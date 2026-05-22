@@ -26,6 +26,7 @@
       "index.html",
       "snippet-tooltip.html",
       "2.ico",
+      "2.icns",
       "package.json"
     ],
     "asarUnpack": [
@@ -45,6 +46,7 @@
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },
     "mac": {
+      "icon": "2.icns",
       "target": [
         {
           "target": "dmg",

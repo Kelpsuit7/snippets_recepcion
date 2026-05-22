@@ -86,7 +86,7 @@ git push origin v1.0.0
 
 El workflow adjunta los `.dmg` y `.zip` al Release del tag.
 
-Nota sobre icono: `2.ico` queda configurado exactamente para Windows. macOS requiere un archivo `.icns` para icono nativo personalizado; no se genero ni convirtio porque el icono solicitado era exactamente `2.ico`.
+Nota sobre icono: Windows usa exactamente `2.ico` y macOS usa exactamente `2.icns`.
 
 ## Permisos necesarios
 
