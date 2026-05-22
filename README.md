@@ -86,7 +86,7 @@ git push origin v1.0.0
 
 El workflow adjunta los `.dmg` y `.zip` al Release del tag.
 
-Nota sobre icono: Windows usa exactamente `2.ico` y macOS usa exactamente `2.icns`.
+Nota sobre icono: la ventana de la app usa exactamente `2.ico` en Windows y macOS usa exactamente `2.icns` para el paquete. El instalador NSIS de Windows no fuerza `2.ico` porque `electron-builder` exige una capa 256x256 dentro del `.ico`; si el archivo no la incluye, el build falla.
 
 ## Permisos necesarios
 

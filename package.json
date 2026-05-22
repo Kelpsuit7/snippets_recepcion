@@ -34,7 +34,6 @@
       "node_modules/@nut-tree-fork/**"
     ],
     "win": {
-      "icon": "2.ico",
       "target": [
         {
           "target": "nsis",
