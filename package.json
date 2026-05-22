@@ -1,0 +1,83 @@
+{
+  "name": "snippets-recepcion",
+  "version": "1.0.0",
+  "description": "App Electron de expansor de texto con snippets globales.",
+  "author": "Snippets Recepcion",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "preview:win": "powershell -NoProfile -Command \"$env:ELECTRON_RUN_AS_NODE=$null; .\\node_modules\\.bin\\electron.cmd .\"",
+    "preview:mac": "ELECTRON_RUN_AS_NODE= ./node_modules/.bin/electron .",
+    "dist:win": "electron-builder --win nsis --x64",
+    "dist:win:portable": "electron-builder --win portable --x64",
+    "dist:mac": "electron-builder --mac dmg zip --x64 --arm64"
+  },
+  "build": {
+    "appId": "cl.snippets.recepcion",
+    "productName": "Snippets Recepcion",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "tooltip-preload.js",
+      "index.html",
+      "snippet-tooltip.html",
+      "2.ico",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/uiohook-napi/**",
+      "node_modules/@nut-tree-fork/**"
+    ],
+    "win": {
+      "icon": "2.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "category": "public.app-category.productivity"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Snippets Recepcion"
+    }
+  },
+  "dependencies": {
+    "@nut-tree-fork/nut-js": "^4.2.6",
+    "uiohook-napi": "^1.5.4"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^26.8.1"
+  }
+}

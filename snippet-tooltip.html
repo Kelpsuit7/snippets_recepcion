@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root {
+      --white: #FFFFFF;
+      --ink: #53676f;
+      --accent: #61bd00;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      width: 100vw;
+      height: 100vh;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      color: var(--ink);
+      background: transparent;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .tooltip {
+      width: calc(100vw - 6px);
+      min-height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 5px 7px;
+      color: var(--ink);
+      background: color-mix(in srgb, var(--white) 82%, transparent);
+      border: 1px solid var(--ink);
+      border-radius: 8px;
+      box-shadow: 0 8px 18px color-mix(in srgb, var(--ink) 14%, transparent);
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .key {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 36px;
+      min-height: 20px;
+      padding: 0 8px;
+      color: var(--white);
+      background: var(--accent);
+      border: 1px solid var(--accent);
+      border-radius: 4px;
+      font-size: 13px;
+      font-weight: 800;
+      line-height: 1;
+    }
+  </style>
+</head>
+<body>
+  <div class="tooltip">
+    <span>Snippet</span>
+    <span class="key">TAB</span>
+  </div>
+
+  <script>
+    window.tooltipApi.onDetected(() => {});
+  </script>
+</body>
+</html>
