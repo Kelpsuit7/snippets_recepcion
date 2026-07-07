@@ -1,0 +1,104 @@
+name: Build desktop artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CSC_IDENTITY_AUTO_DISCOVERY: "false"
+  ELECTRON_BUILDER_DISABLE_TELEMETRY: "true"
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            platform: win
+            arch: x64
+            icon: 2.ico
+            build-command: npx electron-builder --win nsis --x64 --publish never --config.npmRebuild=false
+            artifact-name: snippets-recepcion-windows-x64
+            artifact-path: dist/*.exe
+          - name: macOS Intel x64
+            os: macos-15-intel
+            platform: mac
+            arch: x64
+            icon: 2.icns
+            build-command: npx electron-builder --mac dmg zip --x64 --publish never --config.npmRebuild=false
+            artifact-name: snippets-recepcion-macos-x64
+            artifact-path: |
+              dist/*.dmg
+              dist/*.zip
+          - name: macOS Apple Silicon arm64
+            os: macos-15
+            platform: mac
+            arch: arm64
+            icon: 2.icns
+            build-command: npx electron-builder --mac dmg zip --arm64 --publish never --config.npmRebuild=false
+            artifact-name: snippets-recepcion-macos-arm64
+            artifact-path: |
+              dist/*.dmg
+              dist/*.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify app icon
+        shell: pwsh
+        run: |
+          $iconPath = "${{ matrix.icon }}"
+          if (!(Test-Path -LiteralPath $iconPath)) {
+            throw "App icon not found: $iconPath"
+          }
+
+          $package = Get-Content -Raw -LiteralPath package.json | ConvertFrom-Json
+          $configuredIcon = if ("${{ matrix.platform }}" -eq "win") {
+            $package.build.win.icon
+          } else {
+            $package.build.mac.icon
+          }
+
+          if ($configuredIcon -ne $iconPath) {
+            throw "Expected ${{ matrix.platform }} icon '$iconPath', but package.json uses '$configuredIcon'"
+          }
+
+      - name: Check main process syntax
+        run: node --check main.js
+
+      - name: Build ${{ matrix.name }}
+        run: ${{ matrix.build-command }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: ${{ matrix.artifact-path }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact-path }}

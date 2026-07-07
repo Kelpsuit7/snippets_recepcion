@@ -1,20 +1,84 @@
 const electron = require('electron');
 const { uIOhook, UiohookKey } = require('uiohook-napi');
 const { keyboard, Key } = require('@nut-tree-fork/nut-js');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const { app, BrowserWindow, clipboard, screen } = electron;
+const {
+  app,
+  BrowserWindow,
+  clipboard,
+  dialog,
+  globalShortcut,
+  Menu,
+  screen,
+} = electron;
 const ipcMain = electron.ipcMain || app.ipcMain;
 
 const MAX_BUFFER_LENGTH = 20;
 const SUGGESTION_WIDTH = 116;
 const SUGGESTION_HEIGHT = 34;
+const CARET_OFFSET_Y = 12;
 const DEFAULT_SETTINGS = {
   expansionEnabled: true,
   showSuggestion: true,
-  restoreFocusAfterTab: true,
+  theme: 'mint',
 };
+const VALID_THEMES = new Set(['mint', 'rose', 'sky', 'lavender', 'peach']);
+
+const WINDOWS_CARET_POSITION_SCRIPT = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class CaretNative {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct POINT {
+    public int X;
+    public int Y;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct GUITHREADINFO {
+    public int cbSize;
+    public int flags;
+    public IntPtr hwndActive;
+    public IntPtr hwndFocus;
+    public IntPtr hwndCapture;
+    public IntPtr hwndMenuOwner;
+    public IntPtr hwndMoveSize;
+    public IntPtr hwndCaret;
+    public RECT rcCaret;
+  }
+
+  [DllImport("user32.dll")]
+  public static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO lpgui);
+
+  [DllImport("user32.dll")]
+  public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+}
+"@
+
+$info = New-Object CaretNative+GUITHREADINFO
+$info.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([type]'CaretNative+GUITHREADINFO')
+
+if ([CaretNative]::GetGUIThreadInfo(0, [ref]$info) -and $info.hwndCaret -ne [IntPtr]::Zero) {
+  $point = New-Object CaretNative+POINT
+  $point.X = $info.rcCaret.Left
+  $point.Y = $info.rcCaret.Top
+  [void][CaretNative]::ClientToScreen($info.hwndCaret, [ref]$point)
+  "$($point.X),$($point.Y)"
+}
+`;
 
 keyboard.config.autoDelayMs = 0;
 
@@ -25,10 +89,14 @@ let collections = [];
 let settings = { ...DEFAULT_SETTINGS };
 let keyboardBuffer = '';
 let isExpandingSnippet = false;
+let isForwardingTab = false;
 let listenerStarted = false;
+let tabShortcutRegistered = false;
+let devReloadTimer = null;
 let snippetsPath = '';
 let collectionsPath = '';
 let settingsPath = '';
+let pendingCsvImport = null;
 
 function keyCode(names, fallback) {
   const candidates = Array.isArray(names) ? names : [names];
@@ -72,6 +140,8 @@ const KEY = {
 };
 
 function createWindow() {
+  Menu.setApplicationMenu(null);
+
   mainWindow = new BrowserWindow({
     width: 1040,
     height: 720,
@@ -86,6 +156,7 @@ function createWindow() {
     },
   });
 
+  mainWindow.setMenu(null);
   mainWindow.loadFile('index.html');
 }
 
@@ -115,6 +186,51 @@ function createSuggestionWindow() {
   suggestionWindow.setIgnoreMouseEvents(true);
   suggestionWindow.setAlwaysOnTop(true, 'screen-saver');
   suggestionWindow.loadFile('snippet-tooltip.html');
+}
+
+function isDevelopmentRun() {
+  return !app.isPackaged;
+}
+
+function reloadRendererWindows() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.reloadIgnoringCache();
+  }
+
+  if (suggestionWindow && !suggestionWindow.isDestroyed()) {
+    suggestionWindow.loadFile('snippet-tooltip.html');
+  }
+}
+
+function scheduleRendererReload() {
+  clearTimeout(devReloadTimer);
+  devReloadTimer = setTimeout(() => {
+    reloadRendererWindows();
+  }, 150);
+}
+
+function startDevelopmentReload() {
+  if (!isDevelopmentRun()) {
+    return;
+  }
+
+  [
+    'index.html',
+    'renderer.js',
+    'preload.js',
+    'snippet-tooltip.html',
+    'tooltip-preload.js',
+  ].forEach((fileName) => {
+    fs.watchFile(
+      path.join(__dirname, fileName),
+      { interval: 300 },
+      (current, previous) => {
+        if (current.mtimeMs !== previous.mtimeMs) {
+          scheduleRendererReload();
+        }
+      }
+    );
+  });
 }
 
 function trimBuffer() {
@@ -180,6 +296,45 @@ function hideSnippetSuggestion() {
   }
 }
 
+function getTextCaretScreenPoint() {
+  if (process.platform !== 'win32') {
+    return null;
+  }
+
+  try {
+    const output = execFileSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        WINDOWS_CARET_POSITION_SCRIPT,
+      ],
+      {
+        encoding: 'utf8',
+        timeout: 500,
+        windowsHide: true,
+      }
+    ).trim();
+
+    const [x, y] = output.split(',').map((value) => Number.parseInt(value, 10));
+
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      return { x, y };
+    }
+  } catch (error) {
+    return null;
+  }
+
+  return null;
+}
+
+function getSnippetSuggestionAnchor() {
+  return getTextCaretScreenPoint() || screen.getCursorScreenPoint();
+}
+
 function showSnippetSuggestion(snippet) {
   if (!settings.showSuggestion) {
     hideSnippetSuggestion();
@@ -190,15 +345,15 @@ function showSnippetSuggestion(snippet) {
     return;
   }
 
-  const cursor = screen.getCursorScreenPoint();
-  const display = screen.getDisplayNearestPoint(cursor);
+  const anchor = getSnippetSuggestionAnchor();
+  const display = screen.getDisplayNearestPoint(anchor);
   const workArea = display.workArea;
   const x = Math.min(
-    Math.max(cursor.x + 18, workArea.x),
+    Math.max(anchor.x - Math.round(SUGGESTION_WIDTH / 2), workArea.x),
     workArea.x + workArea.width - SUGGESTION_WIDTH
   );
   const y = Math.min(
-    Math.max(cursor.y - SUGGESTION_HEIGHT - 46, workArea.y),
+    Math.max(anchor.y - SUGGESTION_HEIGHT - CARET_OFFSET_Y, workArea.y),
     workArea.y + workArea.height - SUGGESTION_HEIGHT
   );
 
@@ -230,6 +385,330 @@ function delay(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function detectCsvDelimiter(line) {
+  let commaCount = 0;
+  let semicolonCount = 0;
+  let inQuotes = false;
+
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    const nextCharacter = line[index + 1];
+
+    if (character === '"' && nextCharacter === '"') {
+      index += 1;
+      continue;
+    }
+
+    if (character === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (!inQuotes && character === ',') {
+      commaCount += 1;
+    }
+
+    if (!inQuotes && character === ';') {
+      semicolonCount += 1;
+    }
+  }
+
+  return semicolonCount > commaCount ? ';' : ',';
+}
+
+function parseCsv(text) {
+  const source = String(text || '').replace(/^\uFEFF/, '');
+  const delimiter = detectCsvDelimiter(source.split(/\r?\n/, 1)[0] || '');
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    const nextCharacter = source[index + 1];
+
+    if (character === '"' && inQuotes && nextCharacter === '"') {
+      field += '"';
+      index += 1;
+      continue;
+    }
+
+    if (character === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (!inQuotes && character === delimiter) {
+      row.push(field);
+      field = '';
+      continue;
+    }
+
+    if (!inQuotes && (character === '\n' || character === '\r')) {
+      if (character === '\r' && nextCharacter === '\n') {
+        index += 1;
+      }
+
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+      continue;
+    }
+
+    field += character;
+  }
+
+  if (field || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+
+  return rows.filter((item) => item.some((cell) => String(cell || '').trim()));
+}
+
+function csvEscape(value) {
+  const text = String(value || '');
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function buildSnippetsCsv() {
+  const rows = [['coleccion', 'abreviatura', 'texto html', 'etiqueta']];
+
+  snippets.forEach((snippet) => {
+    const label = Object.prototype.hasOwnProperty.call(snippet, 'label')
+      ? snippet.label
+      : snippet.trigger;
+
+    rows.push([
+      getCollectionNameById(snippet.collectionId),
+      snippet.trigger,
+      snippet.text,
+      label,
+    ]);
+  });
+
+  return `${rows.map((row) => row.map(csvEscape).join(',')).join('\r\n')}\r\n`;
+}
+
+function normalizeHeader(value) {
+  return normalizeForMatch(value).replace(/[^a-z0-9]+/g, '');
+}
+
+function getColumnIndex(headers, names, fallback) {
+  const normalizedNames = names.map(normalizeHeader);
+  const index = headers.findIndex((header) => normalizedNames.includes(normalizeHeader(header)));
+  return index >= 0 ? index : fallback;
+}
+
+function hasKnownCsvHeader(row) {
+  const headers = row.map(normalizeHeader);
+  return headers.some((header) => [
+    'trigger',
+    'abreviatura',
+    'atajo',
+    'texto',
+    'text',
+    'reemplazo',
+    'collection',
+    'coleccion',
+    'label',
+    'etiqueta',
+    'nombre',
+  ].includes(header));
+}
+
+function isMacResourceForkCsv(source) {
+  return source.includes('This resource fork intentionally left blank')
+    || source.includes('com.apple.metadata:kMDItemWhereFroms');
+}
+
+function getCollectionNameById(collectionId) {
+  if (!collectionId) {
+    return 'Sin coleccion';
+  }
+
+  const collection = collections.find((item) => item.id === collectionId);
+  return collection ? collection.name : 'Sin coleccion';
+}
+
+function getOrCreateCollectionId(value) {
+  const name = String(value || '').trim();
+
+  if (!name) {
+    return '';
+  }
+
+  const existing = collections.find((item) => (
+    item.id === name || normalizeForMatch(item.name) === normalizeForMatch(name)
+  ));
+
+  if (existing) {
+    return existing.id;
+  }
+
+  const collection = normalizeCollection({ name });
+  collections.push(collection);
+  return collection.id;
+}
+
+function getCsvCollectionNameFromFilePath(filePath) {
+  return path.basename(filePath, path.extname(filePath)).trim();
+}
+
+function readSnippetsFromCsv(source, options = {}) {
+  if (isMacResourceForkCsv(String(source || ''))) {
+    throw new Error('Seleccionaste el archivo auxiliar de macOS (._). Importa el CSV real, por ejemplo Correos.csv.');
+  }
+
+  const rows = parseCsv(source);
+
+  if (rows.length === 0) {
+    throw new Error('El CSV no contiene snippets.');
+  }
+
+  const firstRow = rows[0];
+  const hasHeader = hasKnownCsvHeader(firstRow);
+  const headers = hasHeader ? firstRow : ['trigger', 'text', 'label'];
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  const triggerIndex = getColumnIndex(headers, ['trigger', 'abreviatura', 'atajo'], 0);
+  const textIndex = getColumnIndex(headers, ['text', 'texto', 'texto html', 'textohtml', 'reemplazo', 'texto de reemplazo'], 1);
+  const labelIndex = hasHeader
+    ? getColumnIndex(headers, ['label', 'etiqueta', 'nombre'], -1)
+    : 2;
+  const collectionIndex = hasHeader
+    ? getColumnIndex(headers, ['collection', 'coleccion', 'collectionId', 'collection id'], -1)
+    : -1;
+  const importCollectionName = String(options.collectionName || '').trim();
+  const parsedSnippets = [];
+  let skippedCount = 0;
+
+  dataRows.forEach((row) => {
+    const rowCollectionName = collectionIndex >= 0
+      ? String(row[collectionIndex] || '').trim()
+      : importCollectionName;
+    const snippet = normalizeSnippet({
+      trigger: row[triggerIndex],
+      text: row[textIndex],
+      label: labelIndex >= 0 ? row[labelIndex] : row[triggerIndex],
+      collectionId: '',
+    });
+
+    if (!snippet.trigger || !snippet.text || snippet.trigger.length > MAX_BUFFER_LENGTH) {
+      skippedCount += 1;
+      return;
+    }
+
+    parsedSnippets.push({
+      trigger: snippet.trigger,
+      text: snippet.text,
+      label: snippet.label,
+      collectionName: rowCollectionName,
+    });
+  });
+
+  if (parsedSnippets.length === 0) {
+    throw new Error('No se encontro ningun snippet valido en el CSV.');
+  }
+
+  return {
+    snippets: parsedSnippets,
+    skippedCount,
+    collectionName: collectionIndex >= 0 ? '' : importCollectionName,
+  };
+}
+
+function getImportConflicts(importedSnippets) {
+  const conflicts = [];
+  const seenTriggers = new Set();
+
+  importedSnippets.forEach((snippet) => {
+    const normalizedTrigger = normalizeForMatch(snippet.trigger);
+
+    if (
+      seenTriggers.has(normalizedTrigger)
+      || !snippets.some((item) => normalizeForMatch(item.trigger) === normalizedTrigger)
+    ) {
+      return;
+    }
+
+    seenTriggers.add(normalizedTrigger);
+    conflicts.push(snippet.trigger);
+  });
+
+  return conflicts;
+}
+
+function applyImportedSnippets(importedSnippets, options = {}) {
+  const conflictStrategy = options.conflictStrategy || 'overwrite';
+  let importedCount = 0;
+  let skippedConflictCount = 0;
+
+  importedSnippets.forEach((snippet) => {
+    const existingIndex = snippets.findIndex((item) => (
+      normalizeForMatch(item.trigger) === normalizeForMatch(snippet.trigger)
+    ));
+
+    if (existingIndex >= 0 && conflictStrategy === 'skip') {
+      skippedConflictCount += 1;
+      return;
+    }
+
+    const storedSnippet = {
+      trigger: snippet.trigger,
+      text: snippet.text,
+      label: snippet.label,
+      collectionId: getOrCreateCollectionId(snippet.collectionName),
+    };
+
+    if (existingIndex >= 0) {
+      snippets[existingIndex] = storedSnippet;
+    } else {
+      snippets.push(storedSnippet);
+    }
+
+    importedCount += 1;
+  });
+
+  saveCollectionsToDisk();
+  saveSnippetsToDisk();
+  notifyCollectionChange();
+  notifySnippetChange();
+
+  return {
+    importedCount,
+    skippedConflictCount,
+  };
+}
+
+function importSnippetsFromCsv(source, options = {}) {
+  const parsedImport = readSnippetsFromCsv(source, options);
+  const conflicts = getImportConflicts(parsedImport.snippets);
+
+  if (conflicts.length > 0 && !options.conflictStrategy) {
+    return {
+      needsConflictDecision: true,
+      conflicts,
+      importedCount: 0,
+      skippedCount: parsedImport.skippedCount,
+      totalCount: snippets.length,
+      collectionName: parsedImport.collectionName,
+    };
+  }
+
+  const importResult = applyImportedSnippets(parsedImport.snippets, {
+    conflictStrategy: options.conflictStrategy,
+  });
+
+  return {
+    importedCount: importResult.importedCount,
+    skippedCount: parsedImport.skippedCount + importResult.skippedConflictCount,
+    totalCount: snippets.length,
+    collectionName: parsedImport.collectionName,
+  };
 }
 
 function getSnippetsPath() {
@@ -275,16 +754,18 @@ function isValidStoredCollection(value) {
 }
 
 function normalizeStoredSettings(value) {
+  const storedValue = value && typeof value === 'object' ? value : {};
+
   return {
-    expansionEnabled: typeof value.expansionEnabled === 'boolean'
-      ? value.expansionEnabled
+    expansionEnabled: typeof storedValue.expansionEnabled === 'boolean'
+      ? storedValue.expansionEnabled
       : DEFAULT_SETTINGS.expansionEnabled,
-    showSuggestion: typeof value.showSuggestion === 'boolean'
-      ? value.showSuggestion
+    showSuggestion: typeof storedValue.showSuggestion === 'boolean'
+      ? storedValue.showSuggestion
       : DEFAULT_SETTINGS.showSuggestion,
-    restoreFocusAfterTab: typeof value.restoreFocusAfterTab === 'boolean'
-      ? value.restoreFocusAfterTab
-      : DEFAULT_SETTINGS.restoreFocusAfterTab,
+    theme: VALID_THEMES.has(storedValue.theme)
+      ? storedValue.theme
+      : DEFAULT_SETTINGS.theme,
   };
 }
 
@@ -453,12 +934,6 @@ async function pressBackspace(times) {
   }
 }
 
-async function pressShiftTab() {
-  await keyboard.pressKey(Key.LeftShift, Key.Tab);
-  await keyboard.releaseKey(Key.LeftShift, Key.Tab);
-  await delay(4);
-}
-
 async function pasteClipboardText(text) {
   clipboard.writeText(text);
 
@@ -477,15 +952,8 @@ async function expandSnippet(snippet) {
   hideSnippetSuggestion();
 
   try {
-    // uiohook-napi escucha eventos globales, pero no cancela TAB. En campos
-    // donde TAB mueve el foco, Shift+TAB vuelve al campo anterior antes de borrar.
-    await delay(6);
-
-    if (settings.restoreFocusAfterTab) {
-      await pressShiftTab();
-    }
-
-    // Despues se borra solo el trigger escrito.
+    // El atajo global de TAB evita que el foco avance antes de llegar aqui.
+    await delay(4);
     await pressBackspace(snippet.trigger.length);
 
     // El portapapeles conserva acentos, saltos de linea y textos largos.
@@ -503,12 +971,68 @@ function handleTabKey() {
   const matchingSnippet = findMatchingSnippet();
 
   if (!matchingSnippet) {
-    // Sin coincidencia no se simula nada: TAB queda como comportamiento normal.
     hideSnippetSuggestion();
     return;
   }
 
   void expandSnippet(matchingSnippet);
+}
+
+async function forwardTabKey() {
+  isForwardingTab = true;
+
+  try {
+    if (tabShortcutRegistered) {
+      globalShortcut.unregister('Tab');
+      tabShortcutRegistered = false;
+    }
+
+    await keyboard.pressKey(Key.Tab);
+    await keyboard.releaseKey(Key.Tab);
+  } finally {
+    setTimeout(() => {
+      isForwardingTab = false;
+      updateTabShortcutRegistration();
+    }, 20);
+  }
+}
+
+function handleTabShortcut() {
+  if (isExpandingSnippet || isForwardingTab || !settings.expansionEnabled) {
+    void forwardTabKey();
+    return;
+  }
+
+  const matchingSnippet = findMatchingSnippet();
+
+  if (!matchingSnippet) {
+    hideSnippetSuggestion();
+    void forwardTabKey();
+    return;
+  }
+
+  void expandSnippet(matchingSnippet);
+}
+
+function updateTabShortcutRegistration() {
+  if (!settings.expansionEnabled || isForwardingTab) {
+    if (tabShortcutRegistered) {
+      globalShortcut.unregister('Tab');
+      tabShortcutRegistered = false;
+    }
+
+    return;
+  }
+
+  if (tabShortcutRegistered) {
+    return;
+  }
+
+  tabShortcutRegistered = globalShortcut.register('Tab', handleTabShortcut);
+
+  if (!tabShortcutRegistered) {
+    console.error('No se pudo registrar TAB como atajo global.');
+  }
 }
 
 function handleKeydown(event) {
@@ -523,6 +1047,10 @@ function handleKeydown(event) {
   }
 
   if (event.keycode === KEY.Tab) {
+    if (tabShortcutRegistered || isForwardingTab) {
+      return;
+    }
+
     handleTabKey();
     return;
   }
@@ -562,7 +1090,7 @@ function startGlobalKeyboardListener() {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send(
         'snippets:listener-error',
-        'No se pudo iniciar el listener global. En macOS revisa Accesibilidad y Monitoreo de entrada; en Windows revisa permisos de la app.'
+        'No se pudieron activar los snippets. Reabre la app o revisa los permisos.'
       );
     }
   }
@@ -584,7 +1112,9 @@ function normalizeSnippet(snippet) {
   return {
     trigger: String(snippet.trigger || '').trim(),
     text: String(snippet.text || ''),
+    label: String(snippet.label || ''),
     collectionId: String(snippet.collectionId || '').trim(),
+    originalTrigger: String(snippet.originalTrigger || '').trim(),
   };
 }
 
@@ -621,6 +1151,19 @@ ipcMain.handle('collections:update', (_event, payload) => {
   const collection = normalizeCollection(payload);
   const index = collections.findIndex((item) => item.id === collection.id);
 
+  if (!collection.name) {
+    throw new Error('El nombre de la coleccion es obligatorio.');
+  }
+
+  const duplicateIndex = collections.findIndex((item) => (
+    item.id !== collection.id
+    && normalizeForMatch(item.name) === normalizeForMatch(collection.name)
+  ));
+
+  if (duplicateIndex >= 0) {
+    throw new Error('Ya existe una coleccion con ese nombre.');
+  }
+
   if (index >= 0) {
     collections[index] = collection;
     saveCollectionsToDisk();
@@ -628,6 +1171,47 @@ ipcMain.handle('collections:update', (_event, payload) => {
   }
 
   return collections;
+});
+
+ipcMain.handle('collections:delete', (_event, payload) => {
+  const collectionId = String(payload.collectionId || '').trim();
+  const index = collections.findIndex((item) => item.id === collectionId);
+
+  if (index < 0) {
+    return {
+      collections,
+      snippets,
+      affectedCount: 0,
+      deleted: false,
+    };
+  }
+
+  let affectedCount = 0;
+
+  snippets = snippets.map((snippet) => {
+    if (snippet.collectionId !== collectionId) {
+      return snippet;
+    }
+
+    affectedCount += 1;
+    return {
+      ...snippet,
+      collectionId: '',
+    };
+  });
+
+  collections.splice(index, 1);
+  saveCollectionsToDisk();
+  saveSnippetsToDisk();
+  notifyCollectionChange();
+  notifySnippetChange();
+
+  return {
+    collections,
+    snippets,
+    affectedCount,
+    deleted: true,
+  };
 });
 
 ipcMain.handle('settings:get', () => settings);
@@ -643,11 +1227,96 @@ ipcMain.handle('settings:update', (_event, payload) => {
   }
 
   saveSettingsToDisk();
+  updateTabShortcutRegistration();
   return settings;
+});
+
+ipcMain.handle('snippets:export-csv', async () => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Exportar snippets',
+    defaultPath: 'Snippets.csv',
+    filters: [
+      { name: 'CSV', extensions: ['csv'] },
+    ],
+  });
+
+  if (result.canceled || !result.filePath) {
+    return { canceled: true };
+  }
+
+  fs.writeFileSync(result.filePath, buildSnippetsCsv(), 'utf8');
+
+  return {
+    canceled: false,
+    filePath: result.filePath,
+    exportedCount: snippets.length,
+  };
+});
+
+ipcMain.handle('snippets:import-csv', async (_event, payload = {}) => {
+  if (pendingCsvImport && payload.conflictStrategy) {
+    if (payload.conflictStrategy === 'cancel') {
+      pendingCsvImport = null;
+      return { canceled: true };
+    }
+
+    const importResult = importSnippetsFromCsv(
+      pendingCsvImport.source,
+      {
+        collectionName: pendingCsvImport.collectionName,
+        conflictStrategy: payload.conflictStrategy,
+      }
+    );
+    const filePath = pendingCsvImport.filePath;
+    pendingCsvImport = null;
+
+    return {
+      canceled: false,
+      filePath,
+      ...importResult,
+    };
+  }
+
+  pendingCsvImport = null;
+
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Importar snippets',
+    properties: ['openFile'],
+    filters: [
+      { name: 'CSV', extensions: ['csv'] },
+    ],
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return { canceled: true };
+  }
+
+  const filePath = result.filePaths[0];
+  const collectionName = getCsvCollectionNameFromFilePath(filePath);
+  const source = fs.readFileSync(filePath, 'utf8');
+  const importResult = importSnippetsFromCsv(
+    source,
+    { collectionName }
+  );
+
+  if (importResult.needsConflictDecision) {
+    pendingCsvImport = {
+      source,
+      filePath,
+      collectionName,
+    };
+  }
+
+  return {
+    canceled: false,
+    filePath,
+    ...importResult,
+  };
 });
 
 ipcMain.handle('snippets:create', (_event, payload) => {
   const snippet = normalizeSnippet(payload);
+  const payloadHasLabel = Object.prototype.hasOwnProperty.call(payload || {}, 'label');
 
   if (!snippet.trigger || !snippet.text) {
     throw new Error('El trigger y el texto son obligatorios.');
@@ -657,14 +1326,34 @@ ipcMain.handle('snippets:create', (_event, payload) => {
     throw new Error(`El trigger no puede superar ${MAX_BUFFER_LENGTH} caracteres.`);
   }
 
+  const originalIndex = snippet.originalTrigger
+    ? snippets.findIndex((item) => item.trigger === snippet.originalTrigger)
+    : -1;
+  const originalSnippet = originalIndex >= 0 ? snippets[originalIndex] : null;
   const existingIndex = snippets.findIndex((item) => (
     normalizeForMatch(item.trigger) === normalizeForMatch(snippet.trigger)
   ));
+  const storedSnippet = {
+    trigger: snippet.trigger,
+    text: snippet.text,
+    label: payloadHasLabel
+      ? snippet.label
+      : originalSnippet && Object.prototype.hasOwnProperty.call(originalSnippet, 'label')
+        ? originalSnippet.label
+        : snippet.trigger,
+    collectionId: snippet.collectionId,
+  };
 
-  if (existingIndex >= 0) {
-    snippets[existingIndex] = snippet;
+  if (originalIndex >= 0) {
+    snippets[originalIndex] = storedSnippet;
+
+    if (existingIndex >= 0 && existingIndex !== originalIndex) {
+      snippets.splice(existingIndex, 1);
+    }
+  } else if (existingIndex >= 0) {
+    snippets[existingIndex] = storedSnippet;
   } else {
-    snippets.push(snippet);
+    snippets.push(storedSnippet);
   }
 
   saveSnippetsToDisk();
@@ -691,6 +1380,8 @@ app.whenReady().then(() => {
   createWindow();
   createSuggestionWindow();
   startGlobalKeyboardListener();
+  updateTabShortcutRegistration();
+  startDevelopmentReload();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -700,6 +1391,18 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', () => {
+  [
+    'index.html',
+    'renderer.js',
+    'preload.js',
+    'snippet-tooltip.html',
+    'tooltip-preload.js',
+  ].forEach((fileName) => {
+    fs.unwatchFile(path.join(__dirname, fileName));
+  });
+  clearTimeout(devReloadTimer);
+  globalShortcut.unregisterAll();
+
   if (listenerStarted) {
     uIOhook.stop();
   }

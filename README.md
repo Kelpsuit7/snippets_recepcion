@@ -2,6 +2,20 @@
 
 Aplicacion Electron para expandir snippets de texto con escucha global de teclado.
 
+## Funcionalidades
+
+La aplicación ofrece una interfaz gráfica para gestionar tus snippets, con las siguientes características:
+
+*   **Gestión de Snippets:** Crea, busca y administra tus snippets de texto. Cada snippet consiste en una abreviatura (el `trigger`), el texto de reemplazo y puede ser asignado a una colección.
+*   **Colecciones:** Organiza tus snippets en colecciones para mantener todo ordenado. Puedes crear y nombrar nuevas colecciones según necesites.
+*   **Expansión Global de Texto:** La aplicación escucha lo que escribes en cualquier programa y expande automáticamente las abreviaturas al presionar `TAB`.
+*   **Temas Personalizables:** Personaliza la apariencia de la aplicación con varias paletas de colores pastel, incluyendo Menta, Rosa, Cielo, Lavanda y Durazno.
+*   **Ajustes Flexibles:**
+    *   Activa o desactiva la función de expansión de snippets en cualquier momento.
+    *   Muestra u oculta un aviso flotante que aparece cuando escribes una abreviatura.
+*   **Importación y Exportación:** Respalda tus snippets o compártelos fácilmente importando y exportando la lista completa en formato CSV.
+*   **Multiplataforma:** Compatible con Windows y macOS.
+
 ## Preview en Windows
 
 ```powershell
@@ -86,7 +100,7 @@ git push origin v1.0.0
 
 El workflow adjunta los `.dmg` y `.zip` al Release del tag.
 
-Nota sobre icono: la ventana de la app usa exactamente `2.ico` en Windows y macOS usa exactamente `2.icns` para el paquete. El instalador NSIS de Windows no fuerza `2.ico` porque `electron-builder` exige una capa 256x256 dentro del `.ico`; si el archivo no la incluye, el build falla.
+Nota sobre icono: la ventana de la app y el instalador NSIS de Windows usan `2.ico`, generado desde `story.png` con capa 256x256. macOS usa `2.icns`, tambien generado desde el mismo logo.
 
 ## Permisos necesarios
 
@@ -103,6 +117,27 @@ macOS:
 
 Los snippets se guardan en `app.getPath('userData')/snippets.json`, que apunta a una ruta distinta en Windows y macOS. Electron elige la ubicacion correcta para cada sistema.
 
+## CSV
+
+La pantalla principal exporta un CSV global con todos los snippets y su coleccion:
+
+```csv
+"coleccion","abreviatura","texto html","etiqueta"
+"Correos","fac1","Hola, favor enviar copia de la factura. <br /><br />Muchas gracias","fac1"
+"Informes","inf1","<span style=""font-size:14px;"">Hola</span>",""
+```
+
+Al exportar, todos los snippets llevan un valor en la columna `coleccion`; los que no esten asignados salen como `Sin coleccion`. Al importar, la app entiende ese respaldo global y reconstruye las colecciones desde la columna `coleccion`.
+
+Tambien puede importar archivos sin encabezado compatibles con TextExpander:
+
+```csv
+"fac1","Hola, favor enviar copia de la factura. <br /><br />Muchas gracias","fac1"
+"fac2","<span style=""font-size:14px;"">Hola</span>",""
+```
+
+En archivos sin encabezado, la tercera columna se trata como etiqueta del snippet y no como coleccion. La coleccion se crea automaticamente desde el nombre del archivo importado: `Correos.csv` crea o reutiliza la coleccion `Correos` y asigna ahi todos sus snippets. Si una abreviatura ya existe, la fila importada reemplaza ese snippet.
+
 ## Nota tecnica
 
-`uiohook-napi` escucha teclado globalmente, pero no cancela de forma nativa el evento `TAB` antes del sistema operativo. La app compensa borrando la abreviatura mas el `TAB` e inmediatamente pega el reemplazo desde el portapapeles.
+`uiohook-napi` escucha el texto escrito y Electron registra `TAB` como atajo global cuando la expansion esta activa. Asi el foco no avanza a otro campo antes de borrar la abreviatura y pegar el reemplazo.

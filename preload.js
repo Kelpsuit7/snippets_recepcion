@@ -4,9 +4,12 @@ contextBridge.exposeInMainWorld('snippetsApi', {
   list: () => ipcRenderer.invoke('snippets:list'),
   create: (snippet) => ipcRenderer.invoke('snippets:create', snippet),
   delete: (trigger) => ipcRenderer.invoke('snippets:delete', trigger),
+  importCsv: (payload) => ipcRenderer.invoke('snippets:import-csv', payload),
+  exportCsv: () => ipcRenderer.invoke('snippets:export-csv'),
   listCollections: () => ipcRenderer.invoke('collections:list'),
   createCollection: (collection) => ipcRenderer.invoke('collections:create', collection),
   updateCollection: (collection) => ipcRenderer.invoke('collections:update', collection),
+  deleteCollection: (payload) => ipcRenderer.invoke('collections:delete', payload),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   updateSettings: (settings) => ipcRenderer.invoke('settings:update', settings),
   onChanged: (callback) => {
