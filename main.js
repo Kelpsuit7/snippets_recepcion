@@ -233,6 +233,26 @@ function startDevelopmentReload() {
   });
 }
 
+function enableOpenAtLogin() {
+  if (!app.isPackaged || !['darwin', 'win32'].includes(process.platform)) {
+    return;
+  }
+
+  try {
+    const loginSettings = {
+      openAtLogin: true,
+    };
+
+    if (process.platform === 'win32') {
+      loginSettings.path = process.execPath;
+    }
+
+    app.setLoginItemSettings(loginSettings);
+  } catch (error) {
+    console.error('No se pudo activar el inicio automatico:', error);
+  }
+}
+
 function trimBuffer() {
   if (keyboardBuffer.length > MAX_BUFFER_LENGTH) {
     keyboardBuffer = keyboardBuffer.slice(-MAX_BUFFER_LENGTH);
@@ -1374,6 +1394,7 @@ ipcMain.handle('snippets:delete', (_event, trigger) => {
 });
 
 app.whenReady().then(() => {
+  enableOpenAtLogin();
   loadSettingsFromDisk();
   loadCollectionsFromDisk();
   loadSnippetsFromDisk();
