@@ -1393,6 +1393,31 @@ ipcMain.handle('snippets:delete', (_event, trigger) => {
   return snippets;
 });
 
+ipcMain.handle('snippets:delete-all', (_event, confirmationText) => {
+  if (confirmationText !== 'Eliminar') {
+    throw new Error('Debes escribir Eliminar para confirmar el borrado.');
+  }
+
+  const deletedCount = snippets.length;
+  const deletedCollectionCount = collections.length;
+  snippets = [];
+  collections = [];
+  keyboardBuffer = '';
+  pendingCsvImport = null;
+  hideSnippetSuggestion();
+  saveSnippetsToDisk();
+  saveCollectionsToDisk();
+  notifySnippetChange();
+  notifyCollectionChange();
+
+  return {
+    deletedCount,
+    deletedCollectionCount,
+    snippets,
+    collections,
+  };
+});
+
 app.whenReady().then(() => {
   enableOpenAtLogin();
   loadSettingsFromDisk();

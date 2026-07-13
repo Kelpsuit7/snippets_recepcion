@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('snippetsApi', {
   list: () => ipcRenderer.invoke('snippets:list'),
   create: (snippet) => ipcRenderer.invoke('snippets:create', snippet),
   delete: (trigger) => ipcRenderer.invoke('snippets:delete', trigger),
+  deleteAll: (confirmationText) => ipcRenderer.invoke('snippets:delete-all', confirmationText),
   importCsv: (payload) => ipcRenderer.invoke('snippets:import-csv', payload),
   exportCsv: () => ipcRenderer.invoke('snippets:export-csv'),
   listCollections: () => ipcRenderer.invoke('collections:list'),

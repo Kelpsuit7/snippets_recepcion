@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Snippets</title>
+  <title>VetSnippets</title>
   <style>
     :root {
       --white: #FFFFFF;
@@ -15,10 +15,6 @@
       --surface: #FFFFFF;
       --surface-soft: #EEF6EA;
       --sidebar: #2F4146;
-      --border: color-mix(in srgb, var(--ink) 16%, var(--white));
-      --divider: color-mix(in srgb, var(--ink) 10%, var(--white));
-      --shadow: color-mix(in srgb, var(--ink) 15%, transparent);
-      --focus-ring: color-mix(in srgb, var(--accent) 28%, transparent);
       --danger: #C23A3A;
       --danger-strong: #9F2929;
     }
@@ -76,6 +72,10 @@
     }
 
     body {
+      --border: color-mix(in srgb, var(--ink) 16%, var(--white));
+      --divider: color-mix(in srgb, var(--ink) 10%, var(--white));
+      --shadow: color-mix(in srgb, var(--ink) 15%, transparent);
+      --focus-ring: color-mix(in srgb, var(--accent) 28%, transparent);
       margin: 0;
       min-height: 100vh;
       color: var(--ink);
@@ -168,6 +168,10 @@
     }
 
     .header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: start;
       margin-bottom: 26px;
     }
 
@@ -195,6 +199,24 @@
       border: 1px solid var(--border);
       border-radius: 8px;
       box-shadow: 0 8px 22px color-mix(in srgb, var(--ink) 5%, transparent);
+    }
+
+    .status[hidden] {
+      display: none;
+    }
+
+    .status[data-tone="error"] {
+      color: var(--danger-strong);
+      border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+      background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+    }
+
+    .results-summary {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      text-align: right;
     }
 
     .toolbar {
@@ -278,6 +300,16 @@
       box-shadow: 0 14px 28px color-mix(in srgb, var(--accent) 30%, transparent);
     }
 
+    .primary-button:disabled,
+    .primary-button:disabled:hover {
+      color: color-mix(in srgb, var(--white) 76%, var(--muted));
+      background: color-mix(in srgb, var(--muted) 38%, var(--surface));
+      border-color: transparent;
+      box-shadow: none;
+      cursor: wait;
+      transform: none;
+    }
+
     .primary-button:active,
     .secondary-button:active,
     .icon-button:active {
@@ -328,6 +360,14 @@
       color: var(--white);
       background: var(--danger-strong);
       border-color: var(--danger-strong);
+    }
+
+    .danger-button:disabled,
+    .danger-button:disabled:hover {
+      color: color-mix(in srgb, var(--muted) 70%, var(--surface));
+      background: color-mix(in srgb, var(--surface-soft) 58%, var(--surface));
+      border-color: var(--border);
+      cursor: default;
     }
 
     .app-dialog[hidden] {
@@ -386,6 +426,27 @@
       display: none;
     }
 
+    .app-dialog-verification {
+      display: grid;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .app-dialog-verification[hidden] {
+      display: none;
+    }
+
+    .app-dialog-verification-label {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.45;
+    }
+
+    .app-dialog-verification-label strong {
+      color: var(--ink);
+    }
+
     .app-dialog-actions {
       display: flex;
       justify-content: flex-end;
@@ -432,8 +493,38 @@
       min-width: 0;
     }
 
+    .form-field {
+      min-width: 0;
+      display: grid;
+      gap: 7px;
+    }
+
+    .field-label {
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .field-hint {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .form-actions {
+      display: grid;
+      gap: 8px;
+      align-self: end;
+    }
+
     .form-panel .primary-button {
       width: 100%;
+    }
+
+    .compact-form {
+      grid-template-columns: minmax(240px, 1fr) minmax(160px, auto);
+      max-width: 720px;
+      align-items: end;
     }
 
     .table-wrap {
@@ -497,30 +588,28 @@
     }
 
     .snippet-group-arrow {
-      position: relative;
-      width: 24px;
-      height: 24px;
-      flex: 0 0 24px;
+      width: 28px;
+      height: 28px;
+      flex: 0 0 28px;
+      display: grid;
+      place-items: center;
       border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
-      border-radius: 999px;
+      border-radius: 50%;
       background: color-mix(in srgb, var(--accent) 10%, var(--surface));
-      transition: transform 160ms ease, background 160ms ease, border-color 160ms ease;
+      transition: background 160ms ease, border-color 160ms ease;
     }
 
-    .snippet-group-arrow::before {
-      content: "";
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: 7px;
-      height: 7px;
-      border-right: 2px solid var(--accent-strong);
-      border-bottom: 2px solid var(--accent-strong);
-      transform: translate(-50%, -62%) rotate(45deg);
+    .snippet-group-arrow svg {
+      width: 12px;
+      height: 12px;
+      display: block;
+      color: var(--accent-strong);
+      shape-rendering: geometricPrecision;
+      transition: transform 160ms ease;
     }
 
-    .snippet-group-toggle[aria-expanded="false"] .snippet-group-arrow {
-      transform: rotate(-90deg);
+    .snippet-group-toggle[aria-expanded="true"] .snippet-group-arrow svg {
+      transform: rotate(90deg);
     }
 
     .snippet-group-toggle:hover .snippet-group-arrow {
@@ -576,6 +665,12 @@
       display: flex;
       justify-content: flex-end;
       gap: 8px;
+    }
+
+    .row-action-button {
+      min-height: 34px;
+      padding: 0 10px;
+      font-size: 12px;
     }
 
     .icon-button {
@@ -771,6 +866,42 @@
       box-shadow: 0 14px 34px color-mix(in srgb, var(--ink) 7%, transparent);
     }
 
+    .setting-row.danger-zone {
+      border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+      background: color-mix(in srgb, var(--danger) 5%, var(--surface));
+    }
+
+    .danger-zone .setting-title {
+      color: var(--danger-strong);
+    }
+
+    .help-card {
+      padding: 18px;
+      color: var(--ink);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 14px 34px color-mix(in srgb, var(--ink) 7%, transparent);
+    }
+
+    .help-card summary {
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 800;
+    }
+
+    .help-card ol,
+    .help-card p {
+      margin: 14px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .help-card ol {
+      padding-left: 20px;
+    }
+
     .setting-title {
       margin: 0 0 4px;
       color: var(--ink);
@@ -832,14 +963,31 @@
       background: var(--white);
     }
 
+    .toggle input:disabled + .toggle-track {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
     .nav-item:focus-visible,
     .primary-button:focus-visible,
     .secondary-button:focus-visible,
     .icon-button:focus-visible,
     .snippet-group-toggle:focus-visible,
+    .help-card summary:focus-visible,
     .toggle input:focus-visible + .toggle-track {
       outline: 0;
       box-shadow: 0 0 0 4px var(--focus-ring);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+      }
     }
 
     @media (max-width: 820px) {
@@ -848,7 +996,37 @@
       }
 
       .sidebar {
-        display: none;
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        height: auto;
+        min-height: 0;
+        overflow: visible;
+        padding: 12px 16px;
+        border-right: 0;
+        border-bottom: 1px solid color-mix(in srgb, var(--sidebar) 74%, var(--white));
+        box-shadow: 0 10px 30px color-mix(in srgb, var(--ink) 12%, transparent);
+      }
+
+      .brand {
+        margin-bottom: 10px;
+        font-size: 17px;
+      }
+
+      .brand-mark {
+        width: 30px;
+        height: 30px;
+      }
+
+      .nav {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+      }
+
+      .nav-item {
+        justify-content: center;
+        min-height: 38px;
+        padding: 0 8px;
       }
 
       .main-panel {
@@ -856,6 +1034,7 @@
       }
 
       .toolbar,
+      .header,
       .form-panel,
       .setting-row,
       .collection-header,
@@ -886,6 +1065,10 @@
         justify-self: stretch;
       }
 
+      .results-summary {
+        text-align: left;
+      }
+
       .table-wrap {
         overflow-x: auto;
       }
@@ -897,6 +1080,10 @@
       .actions {
         justify-content: flex-start;
       }
+
+      .actions .secondary-button {
+        width: auto;
+      }
     }
 
     @media (min-width: 821px) and (max-width: 1060px) {
@@ -904,8 +1091,8 @@
         grid-template-columns: minmax(140px, 1fr) minmax(160px, 1fr);
       }
 
-      .textarea,
-      .form-panel .primary-button {
+      .form-panel > .form-field:nth-child(3),
+      .form-panel > .form-actions {
         grid-column: span 2;
       }
     }
@@ -916,10 +1103,10 @@
     <aside class="sidebar" aria-label="Navegacion principal">
       <div class="brand">
         <img class="brand-mark" src="story.png" alt="" aria-hidden="true">
-        <span>Snippets</span>
+        <span>VetSnippets</span>
       </div>
-      <nav class="nav">
-        <button class="nav-item active" type="button" data-nav-target="snippets">Snippets</button>
+      <nav class="nav" aria-label="Secciones">
+        <button class="nav-item active" type="button" data-nav-target="snippets" aria-current="page">Snippets</button>
         <button class="nav-item" type="button" data-nav-target="collections">Colecciones</button>
         <button class="nav-item" type="button" data-nav-target="settings">Ajustes</button>
       </nav>
@@ -927,21 +1114,39 @@
 
     <main class="main-panel">
       <header class="header">
-        <h1>Gestor de snippets</h1>
-        <p class="subtitle">Administra abreviaturas, reemplazos y expansiones rapidas para escribir menos y mantener respuestas consistentes.</p>
+        <div>
+          <h1 data-view-title>Gestor de snippets</h1>
+          <p class="subtitle" data-view-subtitle>Administra abreviaturas, reemplazos y expansiones rápidas.</p>
+        </div>
+        <p class="status" data-status role="status" aria-live="polite" hidden></p>
       </header>
 
       <section class="view" data-view="snippets" aria-label="Gestion de snippets">
         <form class="form-panel" data-add-form>
-          <input class="field" data-trigger type="text" placeholder="Abreviatura" maxlength="20" aria-label="Abreviatura" required>
-          <select class="field" data-collection-select aria-label="Coleccion"></select>
-          <textarea class="textarea" data-text placeholder="Texto de reemplazo" aria-label="Texto de reemplazo" required></textarea>
-          <button class="primary-button" type="submit" data-save-snippet>+ Nuevo Snippet</button>
+          <label class="form-field">
+            <span class="field-label">Abreviatura</span>
+            <input class="field" data-trigger type="text" placeholder="Ej.: /vacuna" maxlength="20" required>
+            <span class="field-hint">Máximo 20 caracteres.</span>
+          </label>
+          <label class="form-field">
+            <span class="field-label">Colección</span>
+            <select class="field" data-collection-select></select>
+            <span class="field-hint">Opcional.</span>
+          </label>
+          <label class="form-field">
+            <span class="field-label">Texto de reemplazo</span>
+            <textarea class="textarea" data-text placeholder="Escribe el contenido que reemplazará la abreviatura" required></textarea>
+            <span class="field-hint">Se insertará exactamente como está escrito.</span>
+          </label>
+          <div class="form-actions">
+            <button class="primary-button" type="submit" data-save-snippet>Crear snippet</button>
+            <button class="secondary-button" type="button" data-cancel-edit hidden>Cancelar edición</button>
+          </div>
         </form>
 
         <div class="toolbar">
-          <input class="search" data-search type="search" placeholder="Buscar" aria-label="Buscar snippets">
-          <p class="status" data-status>Listo para usar.</p>
+          <input class="search" data-search type="search" placeholder="Buscar por abreviatura, texto o colección" aria-label="Buscar snippets">
+          <p class="results-summary" data-results-summary aria-live="polite"></p>
         </div>
 
         <div class="table-wrap">
@@ -949,7 +1154,7 @@
             <thead>
               <tr>
                 <th style="width: 22%;">Abreviatura</th>
-                <th style="width: 18%;">Coleccion</th>
+                <th style="width: 18%;">Colección</th>
                 <th>Texto de Reemplazo</th>
                 <th style="width: 150px; text-align: right;">Acciones</th>
               </tr>
@@ -961,9 +1166,13 @@
       </section>
 
       <section class="view" data-view="collections" aria-label="Colecciones" hidden>
-        <form class="form-panel" data-collection-form>
-          <input class="field" data-collection-name type="text" placeholder="Colección" aria-label="Nombre de coleccion" required>
-          <button class="primary-button" type="submit">+ Nueva Coleccion</button>
+        <form class="form-panel compact-form" data-collection-form>
+          <label class="form-field">
+            <span class="field-label">Nombre de la colección</span>
+            <input class="field" data-collection-name type="text" placeholder="Ej.: Recordatorios" required>
+            <span class="field-hint">Usa un nombre breve y reconocible.</span>
+          </label>
+          <button class="primary-button" type="submit">Crear colección</button>
         </form>
 
         <div class="collection-list" data-collections-list></div>
@@ -1019,6 +1228,24 @@
             </div>
           </div>
 
+          <div class="setting-row danger-zone">
+            <div>
+              <p class="setting-title">Eliminar la base de datos</p>
+              <p class="setting-copy">Borra permanentemente todos los snippets y todas las colecciones. Los ajustes se conservarán.</p>
+            </div>
+            <button class="secondary-button danger-button" type="button" data-delete-all-snippets>Eliminar todo</button>
+          </div>
+
+          <details class="help-card">
+            <summary>Ayuda rápida</summary>
+            <ol>
+              <li>Crea una colección para organizar respuestas relacionadas.</li>
+              <li>Crea un snippet con una abreviatura breve y un texto de reemplazo.</li>
+              <li>Activa los snippets y escribe la abreviatura en cualquier aplicación.</li>
+            </ol>
+            <p>Antes de importar o eliminar información, exporta un CSV como respaldo.</p>
+          </details>
+
         </div>
       </section>
     </main>
@@ -1026,9 +1253,13 @@
 
   <div class="app-dialog" data-confirm-dialog hidden>
     <div class="app-dialog-panel" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
-      <p class="app-dialog-title" id="confirm-title" data-confirm-title>Confirmar accion</p>
+      <p class="app-dialog-title" id="confirm-title" data-confirm-title>Confirmar acción</p>
       <p class="app-dialog-message" id="confirm-message" data-confirm-message></p>
       <div class="app-dialog-detail" data-confirm-detail hidden></div>
+      <label class="app-dialog-verification" data-confirm-verification hidden>
+        <span class="app-dialog-verification-label">Escribe <strong data-confirm-verification-text></strong> para confirmar.</span>
+        <input class="field" type="text" autocomplete="off" spellcheck="false" data-confirm-verification-input>
+      </label>
       <div class="app-dialog-actions">
         <button class="secondary-button" type="button" data-confirm-cancel>Cancelar</button>
         <button class="secondary-button" type="button" data-confirm-secondary hidden>Omitir</button>

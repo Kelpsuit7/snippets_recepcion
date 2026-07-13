@@ -4,17 +4,23 @@ const triggerInput = document.querySelector('[data-trigger]');
 const collectionSelect = document.querySelector('[data-collection-select]');
 const textInput = document.querySelector('[data-text]');
 const saveSnippetButton = document.querySelector('[data-save-snippet]');
+const cancelEditButton = document.querySelector('[data-cancel-edit]');
 const tableBody = document.querySelector('[data-snippets-body]');
 const emptyState = document.querySelector('[data-empty-state]');
 const statusText = document.querySelector('[data-status]');
+const resultsSummary = document.querySelector('[data-results-summary]');
+const viewTitle = document.querySelector('[data-view-title]');
+const viewSubtitle = document.querySelector('[data-view-subtitle]');
 const importCsvButton = document.querySelector('[data-import-csv]');
 const exportCsvButton = document.querySelector('[data-export-csv]');
+const deleteAllSnippetsButton = document.querySelector('[data-delete-all-snippets]');
 const themeSelect = document.querySelector('[data-theme-select]');
 const navButtons = document.querySelectorAll('[data-nav-target]');
 const views = document.querySelectorAll('[data-view]');
 const settingInputs = document.querySelectorAll('[data-setting]');
 const collectionForm = document.querySelector('[data-collection-form]');
 const collectionNameInput = document.querySelector('[data-collection-name]');
+const createCollectionButton = collectionForm.querySelector('button[type="submit"]');
 const collectionsList = document.querySelector('[data-collections-list]');
 const collectionsEmpty = document.querySelector('[data-collections-empty]');
 const confirmDialog = document.querySelector('[data-confirm-dialog]');
@@ -24,6 +30,9 @@ const confirmDetail = document.querySelector('[data-confirm-detail]');
 const confirmCancel = document.querySelector('[data-confirm-cancel]');
 const confirmSecondary = document.querySelector('[data-confirm-secondary]');
 const confirmAccept = document.querySelector('[data-confirm-accept]');
+const confirmVerification = document.querySelector('[data-confirm-verification]');
+const confirmVerificationText = document.querySelector('[data-confirm-verification-text]');
+const confirmVerificationInput = document.querySelector('[data-confirm-verification-input]');
 
 let snippets = [];
 let collections = [];
@@ -35,31 +44,55 @@ const snippetGroupPages = {};
 const collapsedSnippetGroups = {};
 const collectionSnippetPages = {};
 
-const DEFAULT_STATUS_MESSAGE = 'Listo para usar.';
 const STATUS_VISIBLE_MS = 4500;
 const SNIPPETS_PER_PAGE = 10;
 const COLLECTION_SNIPPETS_PER_PAGE = 5;
 const UNASSIGNED_COLLECTION_ID = '__sin_coleccion__';
+const VIEW_METADATA = {
+  snippets: {
+    title: 'Gestor de snippets',
+    subtitle: 'Administra abreviaturas, reemplazos y expansiones rápidas.',
+  },
+  collections: {
+    title: 'Colecciones',
+    subtitle: 'Organiza tus snippets y controla qué grupos están activos.',
+  },
+  settings: {
+    title: 'Ajustes',
+    subtitle: 'Personaliza el funcionamiento, los respaldos y la apariencia.',
+  },
+};
 
 function setStatus(message, options = {}) {
-  const { temporary = true } = options;
+  const { temporary = true, tone = 'info' } = options;
 
   window.clearTimeout(statusTimer);
+
+  if (!message) {
+    statusText.textContent = '';
+    statusText.hidden = true;
+    statusText.dataset.tone = 'info';
+    statusTimer = null;
+    return;
+  }
+
   statusText.textContent = message;
+  statusText.hidden = false;
+  statusText.dataset.tone = tone;
 
   if (!temporary) {
     return;
   }
 
   statusTimer = window.setTimeout(() => {
-    statusText.textContent = DEFAULT_STATUS_MESSAGE;
-    statusTimer = null;
+    setStatus('');
   }, STATUS_VISIBLE_MS);
 }
 
 function setEditingTrigger(trigger) {
   editingTrigger = trigger;
-  saveSnippetButton.textContent = editingTrigger ? 'Guardar cambios' : '+ Nuevo Snippet';
+  saveSnippetButton.textContent = editingTrigger ? 'Guardar cambios' : 'Crear snippet';
+  cancelEditButton.hidden = !editingTrigger;
 }
 
 function focusSoon(element) {
@@ -76,8 +109,16 @@ function closeConfirmDialog(value) {
   confirmDialog.hidden = true;
   confirmDetail.hidden = true;
   confirmSecondary.hidden = true;
-  pendingConfirm.resolve(value);
+  confirmVerification.hidden = true;
+  confirmVerificationInput.value = '';
+  confirmAccept.disabled = false;
+  const { resolve, previousFocus } = pendingConfirm;
   pendingConfirm = null;
+  resolve(value);
+
+  if (previousFocus && previousFocus.isConnected) {
+    focusSoon(previousFocus);
+  }
 }
 
 function showConfirmDialog({
@@ -90,10 +131,13 @@ function showConfirmDialog({
   secondaryValue = false,
   cancelLabel = 'Cancelar',
   cancelValue = false,
+  requiredText = '',
 }) {
   if (pendingConfirm) {
     closeConfirmDialog(false);
   }
+
+  const previousFocus = document.activeElement;
 
   confirmTitle.textContent = title;
   confirmMessage.textContent = message;
@@ -106,8 +150,12 @@ function showConfirmDialog({
   confirmSecondary.dataset.confirmValue = String(secondaryValue);
   confirmAccept.textContent = acceptLabel;
   confirmAccept.dataset.confirmValue = String(acceptValue);
+  confirmVerificationText.textContent = requiredText;
+  confirmVerificationInput.value = '';
+  confirmVerification.hidden = !requiredText;
+  confirmAccept.disabled = Boolean(requiredText);
   confirmDialog.hidden = false;
-  focusSoon(confirmAccept);
+  focusSoon(requiredText ? confirmVerificationInput : confirmAccept);
 
   return new Promise((resolve) => {
     pendingConfirm = {
@@ -115,6 +163,8 @@ function showConfirmDialog({
       acceptValue,
       cancelValue,
       secondaryValue,
+      requiredText,
+      previousFocus,
     };
   });
 }
@@ -149,7 +199,7 @@ function getFilteredSnippets() {
       .filter((collection) => normalizeSearchText(collection.name).includes(query))
       .map((collection) => collection.id)
   );
-  const matchesUnassignedCollection = normalizeSearchText('Sin coleccion').includes(query);
+  const matchesUnassignedCollection = normalizeSearchText('Sin colección').includes(query);
 
   return snippets.filter((snippet) => (
     matchingCollectionIds.has(snippet.collectionId)
@@ -161,15 +211,15 @@ function getFilteredSnippets() {
 
 function getCollectionName(collectionId) {
   if (!collectionId) {
-    return 'Sin coleccion';
+    return 'Sin colección';
   }
 
   const collection = collections.find((item) => item.id === collectionId);
-  return collection ? collection.name : 'Sin coleccion';
+  return collection ? collection.name : 'Sin colección';
 }
 
 function renderCollectionSelect() {
-  collectionSelect.innerHTML = '<option value="">Sin coleccion</option>';
+  collectionSelect.innerHTML = '<option value="">Sin colección</option>';
 
   collections.forEach((collection) => {
     const option = document.createElement('option');
@@ -179,77 +229,6 @@ function renderCollectionSelect() {
   });
 }
 
-/*
-function renderSnippetsFlat() {
-  const filteredSnippets = getFilteredSnippets();
-  const pageCount = Math.max(1, Math.ceil(filteredSnippets.length / SNIPPETS_PER_PAGE));
-  snippetsPage = Math.min(Math.max(snippetsPage, 1), pageCount);
-  const pageStart = (snippetsPage - 1) * SNIPPETS_PER_PAGE;
-  const visibleSnippets = filteredSnippets.slice(pageStart, pageStart + SNIPPETS_PER_PAGE);
-
-  tableBody.innerHTML = '';
-  emptyState.hidden = filteredSnippets.length > 0;
-  snippetsPagination.hidden = filteredSnippets.length <= SNIPPETS_PER_PAGE;
-  snippetsPrevButton.disabled = snippetsPage <= 1;
-  snippetsNextButton.disabled = snippetsPage >= pageCount;
-  snippetsPageStatus.textContent = filteredSnippets.length > 0
-    ? `Pagina ${snippetsPage} de ${pageCount} (${filteredSnippets.length} snippets)`
-    : '';
-
-  visibleSnippets.forEach((snippet) => {
-    const row = document.createElement('tr');
-    row.innerHTML = `
-      <td><span class="trigger"></span></td>
-      <td class="collection-cell"></td>
-      <td class="replacement"></td>
-      <td>
-        <div class="actions">
-          <button class="icon-button active" type="button" title="Editar" aria-label="Editar">E</button>
-          <button class="icon-button danger" type="button" title="Eliminar" aria-label="Eliminar">X</button>
-        </div>
-      </td>
-    `;
-
-    row.querySelector('.trigger').textContent = snippet.trigger;
-    row.querySelector('.collection-cell').textContent = getCollectionName(snippet.collectionId);
-    row.querySelector('.replacement').textContent = escapeNewlines(snippet.text);
-
-    const [editButton, deleteButton] = row.querySelectorAll('button');
-
-    editButton.addEventListener('click', () => {
-      setEditingTrigger(snippet.trigger);
-      triggerInput.value = snippet.trigger;
-      collectionSelect.value = snippet.collectionId || '';
-      textInput.value = snippet.text;
-      triggerInput.focus();
-      setStatus('Snippet cargado para editar.');
-    });
-
-    deleteButton.addEventListener('click', async () => {
-      const confirmed = await showConfirmDialog({
-        title: 'Eliminar snippet',
-        message: `¿Eliminar el snippet "${snippet.trigger}"? Esta accion no se puede deshacer.`,
-      });
-
-      if (!confirmed) {
-        return;
-      }
-
-      snippets = await window.snippetsApi.delete(snippet.trigger);
-      if (editingTrigger === snippet.trigger) {
-        addForm.reset();
-        setEditingTrigger('');
-      }
-      renderSnippets();
-      focusSoon(triggerInput);
-      setStatus(`Snippet ${snippet.trigger} eliminado.`);
-    });
-
-    tableBody.append(row);
-  });
-}
-
-*/
 function getOrderedSnippetGroups(filteredSnippets) {
   const groupsById = new Map();
   const orderedGroups = collections.map((collection) => {
@@ -264,7 +243,7 @@ function getOrderedSnippetGroups(filteredSnippets) {
   });
   const unassignedGroup = {
     id: UNASSIGNED_COLLECTION_ID,
-    name: 'Sin coleccion',
+    name: 'Sin colección',
     snippets: [],
   };
 
@@ -286,8 +265,8 @@ function renderSnippetDataRow(snippet) {
     <td class="replacement"></td>
     <td>
       <div class="actions">
-        <button class="icon-button active" type="button" title="Editar" aria-label="Editar">E</button>
-        <button class="icon-button danger" type="button" title="Eliminar" aria-label="Eliminar">X</button>
+        <button class="secondary-button row-action-button" type="button">Editar</button>
+        <button class="secondary-button danger-button row-action-button" type="button">Eliminar</button>
       </div>
     </td>
   `;
@@ -297,34 +276,41 @@ function renderSnippetDataRow(snippet) {
   row.querySelector('.replacement').textContent = escapeNewlines(snippet.text);
 
   const [editButton, deleteButton] = row.querySelectorAll('button');
+  editButton.setAttribute('aria-label', `Editar snippet ${snippet.trigger}`);
+  deleteButton.setAttribute('aria-label', `Eliminar snippet ${snippet.trigger}`);
 
   editButton.addEventListener('click', () => {
     setEditingTrigger(snippet.trigger);
     triggerInput.value = snippet.trigger;
     collectionSelect.value = snippet.collectionId || '';
     textInput.value = snippet.text;
-    triggerInput.focus();
+    addForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    focusSoon(triggerInput);
     setStatus('Snippet cargado para editar.');
   });
 
   deleteButton.addEventListener('click', async () => {
     const confirmed = await showConfirmDialog({
       title: 'Eliminar snippet',
-      message: `Eliminar el snippet "${snippet.trigger}"? Esta accion no se puede deshacer.`,
+      message: `¿Eliminar el snippet "${snippet.trigger}"? Esta acción no se puede deshacer.`,
     });
 
     if (!confirmed) {
       return;
     }
 
-    snippets = await window.snippetsApi.delete(snippet.trigger);
-    if (editingTrigger === snippet.trigger) {
-      addForm.reset();
-      setEditingTrigger('');
+    try {
+      snippets = await window.snippetsApi.delete(snippet.trigger);
+      if (editingTrigger === snippet.trigger) {
+        addForm.reset();
+        setEditingTrigger('');
+      }
+      renderSnippets();
+      focusSoon(triggerInput);
+      setStatus(`Snippet ${snippet.trigger} eliminado.`);
+    } catch (error) {
+      setStatus(error.message, { tone: 'error' });
     }
-    renderSnippets();
-    focusSoon(triggerInput);
-    setStatus(`Snippet ${snippet.trigger} eliminado.`);
   });
 
   return row;
@@ -337,6 +323,13 @@ function renderSnippets() {
 
   tableBody.innerHTML = '';
   emptyState.hidden = filteredSnippets.length > 0;
+  const hasSearch = Boolean(searchInput.value.trim());
+  emptyState.textContent = hasSearch
+    ? 'No hay resultados para esta búsqueda.'
+    : 'No hay snippets para mostrar.';
+  resultsSummary.textContent = hasSearch
+    ? `${filteredSnippets.length} de ${snippets.length} snippets`
+    : `${snippets.length} snippets en total`;
 
   Object.keys(snippetGroupPages).forEach((groupId) => {
     if (!snippetGroupIds.has(groupId)) {
@@ -351,6 +344,10 @@ function renderSnippets() {
   });
 
   snippetGroups.forEach((group) => {
+    if (!Object.prototype.hasOwnProperty.call(collapsedSnippetGroups, group.id)) {
+      collapsedSnippetGroups[group.id] = true;
+    }
+
     const isCollapsed = Boolean(collapsedSnippetGroups[group.id]);
     const pageCount = Math.max(1, Math.ceil(group.snippets.length / SNIPPETS_PER_PAGE));
     snippetGroupPages[group.id] = Math.min(
@@ -366,16 +363,22 @@ function renderSnippets() {
     groupRow.innerHTML = `
       <td colspan="4">
         <button class="snippet-group-toggle" type="button" aria-expanded="${!isCollapsed}">
-          <span class="snippet-group-arrow" aria-hidden="true"></span>
+          <span class="snippet-group-arrow" aria-hidden="true">
+            <svg viewBox="0 0 16 16" focusable="false">
+              <path d="M4.75 3.5 4.75 12.5 14.5 8Z" fill="currentColor"></path>
+            </svg>
+          </span>
           <span class="snippet-group-name"></span>
           <span class="snippet-group-count"></span>
         </button>
       </td>
     `;
 
+    const groupToggle = groupRow.querySelector('.snippet-group-toggle');
     groupRow.querySelector('.snippet-group-name').textContent = group.name;
     groupRow.querySelector('.snippet-group-count').textContent = `${group.snippets.length} snippets`;
-    groupRow.querySelector('.snippet-group-toggle').addEventListener('click', () => {
+    groupToggle.setAttribute('aria-label', `${isCollapsed ? 'Expandir' : 'Contraer'} colección ${group.name}`);
+    groupToggle.addEventListener('click', () => {
       collapsedSnippetGroups[group.id] = !isCollapsed;
       renderSnippets();
     });
@@ -406,7 +409,7 @@ function renderSnippets() {
 
       prevButton.disabled = groupPage <= 1;
       nextButton.disabled = groupPage >= pageCount;
-      paginationRow.querySelector('.page-status').textContent = `Pagina ${groupPage} de ${pageCount}`;
+      paginationRow.querySelector('.page-status').textContent = `Página ${groupPage} de ${pageCount}`;
       prevButton.addEventListener('click', () => {
         snippetGroupPages[group.id] -= 1;
         renderSnippets();
@@ -476,56 +479,69 @@ function renderCollections() {
     const saveButton = item.querySelector('.save-collection');
     const deleteButton = item.querySelector('.delete-collection');
     const toggle = item.querySelector('.collection-enabled');
+    const statusCopy = item.querySelector('.setting-copy');
     const snippetPagination = item.querySelector('.collection-snippet-pagination');
     const snippetPrevButton = item.querySelector('.collection-snippets-prev');
     const snippetNextButton = item.querySelector('.collection-snippets-next');
     const snippetPageStatus = item.querySelector('.collection-snippets-page-status');
 
     nameInput.value = collection.name;
+    nameInput.setAttribute('aria-label', `Nombre de la colección ${collection.name}`);
+    toggle.setAttribute('aria-label', `${collection.enabled === false ? 'Activar' : 'Desactivar'} colección ${collection.name}`);
+    deleteButton.setAttribute('aria-label', `Eliminar colección ${collection.name}`);
     saveButton.hidden = true;
-    item.querySelector('.setting-copy').textContent = collection.enabled === false
-      ? 'Coleccion desactivada'
-      : 'Coleccion activa';
+    statusCopy.textContent = collection.enabled === false
+      ? 'Colección desactivada'
+      : 'Colección activa';
 
     nameInput.addEventListener('input', () => {
-      saveButton.hidden = nameInput.value !== collection.name ? false : true;
+      const isDirty = nameInput.value !== collection.name;
+      const hasValidName = Boolean(nameInput.value.trim());
+      saveButton.hidden = !isDirty;
+      saveButton.disabled = !hasValidName;
+      toggle.disabled = isDirty;
+      statusCopy.textContent = isDirty
+        ? (hasValidName ? 'Cambios sin guardar' : 'El nombre no puede estar vacío')
+        : (collection.enabled === false ? 'Colección desactivada' : 'Colección activa');
     });
 
     toggle.checked = collection.enabled !== false;
     toggle.addEventListener('change', async () => {
-      collections = await window.snippetsApi.updateCollection({
-        ...collection,
-        name: nameInput.value,
-        enabled: toggle.checked,
-      });
-      renderCollectionSelect();
-      renderCollections();
-      renderSnippets();
-      focusSoon(collectionNameInput);
-      setStatus('Coleccion actualizada.');
+      try {
+        collections = await window.snippetsApi.updateCollection({
+          ...collection,
+          enabled: toggle.checked,
+        });
+        renderCollectionSelect();
+        renderCollections();
+        renderSnippets();
+        setStatus('Colección actualizada.');
+      } catch (error) {
+        toggle.checked = !toggle.checked;
+        setStatus(error.message, { tone: 'error' });
+      }
     });
 
     saveButton.addEventListener('click', async () => {
       try {
         collections = await window.snippetsApi.updateCollection({
           ...collection,
-          name: nameInput.value,
+          name: nameInput.value.trim(),
           enabled: toggle.checked,
         });
         renderCollectionSelect();
         renderCollections();
         renderSnippets();
-        focusSoon(collectionNameInput);
-        setStatus('Coleccion guardada.');
+        setStatus('Colección guardada.');
       } catch (error) {
-        setStatus(error.message);
+        setStatus(error.message, { tone: 'error' });
       }
     });
 
     deleteButton.addEventListener('click', async () => {
       const confirmed = await showConfirmDialog({
-        title: 'Eliminar coleccion',
-        message: `¿Eliminar la coleccion "${collection.name}"? Sus snippets quedaran sin coleccion. Esta accion no se puede deshacer.`,
+        title: 'Eliminar colección',
+        message: `¿Eliminar la colección "${collection.name}"? Sus snippets quedarán sin colección. Esta acción no se puede deshacer.`,
       });
 
       if (!confirmed) {
@@ -533,17 +549,20 @@ function renderCollections() {
         return;
       }
 
-      const result = await window.snippetsApi.deleteCollection({
-        collectionId: collection.id,
-      });
+      try {
+        const result = await window.snippetsApi.deleteCollection({
+          collectionId: collection.id,
+        });
 
-      collections = result.collections;
-      snippets = result.snippets;
-      renderCollectionSelect();
-      renderSnippets();
-      renderCollections();
-      focusSoon(collectionNameInput);
-      setStatus(`Coleccion eliminada. ${result.affectedCount} snippets quedaron sin coleccion.`);
+        collections = result.collections;
+        snippets = result.snippets;
+        renderCollectionSelect();
+        renderSnippets();
+        renderCollections();
+        setStatus(`Colección eliminada. ${result.affectedCount} snippets quedaron sin colección.`);
+      } catch (error) {
+        setStatus(error.message, { tone: 'error' });
+      }
     });
 
     const snippetList = item.querySelector('.snippet-list');
@@ -551,7 +570,7 @@ function renderCollections() {
     if (collectionSnippets.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'snippet-empty';
-      empty.textContent = 'No hay snippets en esta coleccion.';
+      empty.textContent = 'No hay snippets en esta colección.';
       snippetList.append(empty);
     } else {
       visibleCollectionSnippets.forEach((snippet) => {
@@ -571,7 +590,7 @@ function renderCollections() {
     snippetPrevButton.disabled = collectionSnippetPage <= 1;
     snippetNextButton.disabled = collectionSnippetPage >= collectionSnippetPageCount;
     snippetPageStatus.textContent = collectionSnippets.length > 0
-      ? `Pagina ${collectionSnippetPage} de ${collectionSnippetPageCount} (${collectionSnippets.length} snippets)`
+      ? `Página ${collectionSnippetPage} de ${collectionSnippetPageCount} (${collectionSnippets.length} snippets)`
       : '';
 
     snippetPrevButton.addEventListener('click', () => {
@@ -589,13 +608,24 @@ function renderCollections() {
 }
 
 function showView(viewName) {
+  const viewMetadata = VIEW_METADATA[viewName] || VIEW_METADATA.snippets;
+
   views.forEach((view) => {
     view.hidden = view.dataset.view !== viewName;
   });
 
   navButtons.forEach((button) => {
-    button.classList.toggle('active', button.dataset.navTarget === viewName);
+    const isActive = button.dataset.navTarget === viewName;
+    button.classList.toggle('active', isActive);
+    if (isActive) {
+      button.setAttribute('aria-current', 'page');
+    } else {
+      button.removeAttribute('aria-current');
+    }
   });
+
+  viewTitle.textContent = viewMetadata.title;
+  viewSubtitle.textContent = viewMetadata.subtitle;
 }
 
 function renderSettings() {
@@ -605,22 +635,30 @@ function renderSettings() {
   applyAppearance();
 }
 
-async function loadSnippets() {
-  snippets = await window.snippetsApi.list();
-  renderSnippets();
-  renderCollections();
-}
+async function initializeApp() {
+  document.body.setAttribute('aria-busy', 'true');
+  setStatus('Cargando información...', { temporary: false });
 
-async function loadCollections() {
-  collections = await window.snippetsApi.listCollections();
-  renderCollectionSelect();
-  renderSnippets();
-  renderCollections();
-}
-
-async function loadSettings() {
-  settings = await window.snippetsApi.getSettings();
-  renderSettings();
+  try {
+    [snippets, collections, settings] = await Promise.all([
+      window.snippetsApi.list(),
+      window.snippetsApi.listCollections(),
+      window.snippetsApi.getSettings(),
+    ]);
+    renderCollectionSelect();
+    renderSettings();
+    renderSnippets();
+    renderCollections();
+    showView('snippets');
+    setStatus('');
+  } catch (error) {
+    setStatus(`No se pudo cargar la información: ${error.message}`, {
+      temporary: false,
+      tone: 'error',
+    });
+  } finally {
+    document.body.removeAttribute('aria-busy');
+  }
 }
 
 async function refreshAfterImport(result) {
@@ -629,12 +667,13 @@ async function refreshAfterImport(result) {
   renderCollectionSelect();
   renderSnippets();
   renderCollections();
-  const collectionMessage = result.collectionName ? ` Coleccion: ${result.collectionName}.` : '';
+  const collectionMessage = result.collectionName ? ` Colección: ${result.collectionName}.` : '';
   setStatus(`CSV importado: ${result.importedCount} snippets, ${result.skippedCount} filas omitidas.${collectionMessage}`);
 }
 
 addForm.addEventListener('submit', async (event) => {
   event.preventDefault();
+  saveSnippetButton.disabled = true;
 
   const snippet = {
     trigger: triggerInput.value,
@@ -651,12 +690,22 @@ addForm.addEventListener('submit', async (event) => {
     focusSoon(triggerInput);
     setStatus(`Snippet ${snippet.trigger.trim()} guardado.`);
   } catch (error) {
-    setStatus(error.message);
+    setStatus(error.message, { tone: 'error' });
+  } finally {
+    saveSnippetButton.disabled = false;
   }
+});
+
+cancelEditButton.addEventListener('click', () => {
+  addForm.reset();
+  setEditingTrigger('');
+  focusSoon(triggerInput);
+  setStatus('Edición cancelada.');
 });
 
 collectionForm.addEventListener('submit', async (event) => {
   event.preventDefault();
+  createCollectionButton.disabled = true;
 
   try {
     collections = await window.snippetsApi.createCollection({
@@ -667,9 +716,11 @@ collectionForm.addEventListener('submit', async (event) => {
     renderCollections();
     renderSnippets();
     focusSoon(collectionNameInput);
-    setStatus('Coleccion guardada.');
+    setStatus('Colección guardada.');
   } catch (error) {
-    setStatus(error.message);
+    setStatus(error.message, { tone: 'error' });
+  } finally {
+    createCollectionButton.disabled = false;
   }
 });
 
@@ -678,11 +729,13 @@ searchInput.addEventListener('input', () => {
 });
 
 importCsvButton.addEventListener('click', async () => {
+  importCsvButton.disabled = true;
+
   try {
     const result = await window.snippetsApi.importCsv();
 
     if (result.canceled) {
-      setStatus('Importacion cancelada.');
+      setStatus('Importación cancelada.');
       return;
     }
 
@@ -702,7 +755,7 @@ importCsvButton.addEventListener('click', async () => {
 
       if (decision === 'cancel') {
         await window.snippetsApi.importCsv({ conflictStrategy: 'cancel' });
-        setStatus('Importacion cancelada.');
+        setStatus('Importación cancelada.');
         return;
       }
 
@@ -713,31 +766,81 @@ importCsvButton.addEventListener('click', async () => {
 
     await refreshAfterImport(result);
   } catch (error) {
-    setStatus(error.message);
+    setStatus(error.message, { tone: 'error' });
+  } finally {
+    importCsvButton.disabled = false;
   }
 });
 
 exportCsvButton.addEventListener('click', async () => {
+  exportCsvButton.disabled = true;
+
   try {
     const result = await window.snippetsApi.exportCsv();
 
     if (result.canceled) {
-      setStatus('Exportacion cancelada.');
+      setStatus('Exportación cancelada.');
       return;
     }
 
     setStatus(`CSV exportado: ${result.exportedCount} snippets.`);
   } catch (error) {
-    setStatus(error.message);
+    setStatus(error.message, { tone: 'error' });
+  } finally {
+    exportCsvButton.disabled = false;
+  }
+});
+
+deleteAllSnippetsButton.addEventListener('click', async () => {
+  if (snippets.length === 0 && collections.length === 0) {
+    setStatus('No hay snippets ni colecciones para eliminar.');
+    return;
+  }
+
+  const confirmed = await showConfirmDialog({
+    title: 'Eliminar la base de datos',
+    message: `Esta acción eliminará permanentemente ${snippets.length} snippets y ${collections.length} colecciones. No se puede deshacer.`,
+    acceptLabel: 'Aceptar',
+    requiredText: 'Eliminar',
+  });
+
+  if (!confirmed) {
+    setStatus('Eliminación cancelada.');
+    return;
+  }
+
+  deleteAllSnippetsButton.disabled = true;
+
+  try {
+    const result = await window.snippetsApi.deleteAll('Eliminar');
+    snippets = result.snippets;
+    collections = result.collections;
+    setEditingTrigger('');
+    addForm.reset();
+    renderCollectionSelect();
+    renderSnippets();
+    renderCollections();
+    setStatus(`${result.deletedCount} snippets y ${result.deletedCollectionCount} colecciones eliminados.`);
+  } catch (error) {
+    setStatus(error.message, { tone: 'error' });
+  } finally {
+    deleteAllSnippetsButton.disabled = false;
   }
 });
 
 themeSelect.addEventListener('change', async () => {
-  settings = await window.snippetsApi.updateSettings({
-    theme: themeSelect.value,
-  });
-  renderSettings();
-  setStatus('Tema guardado.');
+  const previousTheme = settings.theme || 'mint';
+
+  try {
+    settings = await window.snippetsApi.updateSettings({
+      theme: themeSelect.value,
+    });
+    renderSettings();
+    setStatus('Tema guardado.');
+  } catch (error) {
+    themeSelect.value = previousTheme;
+    setStatus(error.message, { tone: 'error' });
+  }
 });
 
 navButtons.forEach((button) => {
@@ -749,13 +852,21 @@ navButtons.forEach((button) => {
 settingInputs.forEach((input) => {
   input.addEventListener('change', async () => {
     const key = input.dataset.setting;
+    const previousValue = Boolean(settings[key]);
+    input.disabled = true;
 
-    settings = await window.snippetsApi.updateSettings({
-      [key]: input.checked,
-    });
-
-    renderSettings();
-    setStatus('Ajustes guardados.');
+    try {
+      settings = await window.snippetsApi.updateSettings({
+        [key]: input.checked,
+      });
+      renderSettings();
+      setStatus('Ajustes guardados.');
+    } catch (error) {
+      input.checked = previousValue;
+      setStatus(error.message, { tone: 'error' });
+    } finally {
+      input.disabled = false;
+    }
   });
 });
 
@@ -768,7 +879,16 @@ confirmSecondary.addEventListener('click', () => {
 });
 
 confirmAccept.addEventListener('click', () => {
+  if (confirmAccept.disabled) {
+    return;
+  }
+
   closeConfirmDialog(pendingConfirm ? pendingConfirm.acceptValue : true);
+});
+
+confirmVerificationInput.addEventListener('input', () => {
+  confirmAccept.disabled = !pendingConfirm
+    || confirmVerificationInput.value !== pendingConfirm.requiredText;
 });
 
 confirmDialog.addEventListener('click', (event) => {
@@ -782,9 +902,29 @@ document.addEventListener('keydown', (event) => {
     return;
   }
 
+  if (event.key === 'Tab') {
+    const focusableElements = [...confirmDialog.querySelectorAll('button, input')]
+      .filter((element) => !element.hidden && !element.disabled && element.offsetParent !== null);
+    const firstElement = focusableElements[0];
+    const lastElement = focusableElements[focusableElements.length - 1];
+
+    if (focusableElements.length > 0) {
+      if (event.shiftKey && document.activeElement === firstElement) {
+        event.preventDefault();
+        lastElement.focus();
+      } else if (!event.shiftKey && document.activeElement === lastElement) {
+        event.preventDefault();
+        firstElement.focus();
+      }
+    }
+    return;
+  }
+
   if (event.key === 'Enter') {
     event.preventDefault();
-    closeConfirmDialog(pendingConfirm.acceptValue);
+    if (!confirmAccept.disabled) {
+      closeConfirmDialog(pendingConfirm.acceptValue);
+    }
   }
 
   if (event.key === 'Escape') {
@@ -806,9 +946,7 @@ window.snippetsApi.onCollectionsChanged((nextCollections) => {
 });
 
 window.snippetsApi.onListenerError((message) => {
-  setStatus(message);
+  setStatus(message, { temporary: false, tone: 'error' });
 });
 
-loadSnippets();
-loadCollections();
-loadSettings();
+initializeApp();

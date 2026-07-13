@@ -1,4 +1,4 @@
-# Snippets Recepcion
+# VetSnippets
 
 Aplicacion Electron para expandir snippets de texto con escucha global de teclado.
 
@@ -39,7 +39,7 @@ npm install
 npm run dist:win
 ```
 
-El instalador queda en `dist/Snippets Recepcion-Setup-1.0.0.exe`.
+El instalador queda en `dist/VetSnippets-Setup-1.0.0.exe`.
 
 Nota: el build local necesita Visual Studio Build Tools con la carga `Desktop development with C++`, porque `uiohook-napi` es una dependencia nativa.
 
