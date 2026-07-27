@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('snippetsApi', {
   deleteCollection: (payload) => ipcRenderer.invoke('collections:delete', payload),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   updateSettings: (settings) => ipcRenderer.invoke('settings:update', settings),
+  exportDiagnostics: () => ipcRenderer.invoke('diagnostics:export'),
+  updateCaretPosition: (position) => ipcRenderer.send('caret:update', position),
   onChanged: (callback) => {
     const listener = (_event, snippets) => callback(snippets);
     ipcRenderer.on('snippets:changed', listener);

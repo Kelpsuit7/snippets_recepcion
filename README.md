@@ -8,7 +8,7 @@ La aplicación ofrece una interfaz gráfica para gestionar tus snippets, con las
 
 *   **Gestión de Snippets:** Crea, busca y administra tus snippets de texto. Cada snippet consiste en una abreviatura (el `trigger`), el texto de reemplazo y puede ser asignado a una colección.
 *   **Colecciones:** Organiza tus snippets en colecciones para mantener todo ordenado. Puedes crear y nombrar nuevas colecciones según necesites.
-*   **Expansión Global de Texto:** La aplicación escucha lo que escribes en cualquier programa y expande automáticamente las abreviaturas al presionar `TAB`.
+*   **Expansión Global de Texto:** La aplicación escucha lo que escribes en cualquier programa y expande las abreviaturas al presionar `Shift`.
 *   **Temas Personalizables:** Personaliza la apariencia de la aplicación con varias paletas de colores pastel, incluyendo Menta, Rosa, Cielo, Lavanda y Durazno.
 *   **Ajustes Flexibles:**
     *   Activa o desactiva la función de expansión de snippets en cualquier momento.
@@ -117,6 +117,8 @@ macOS:
 
 Los snippets se guardan en `app.getPath('userData')/snippets.json`, que apunta a una ruta distinta en Windows y macOS. Electron elige la ubicacion correcta para cada sistema.
 
+VetSnippets se registra para iniciar con el sistema usando `--background`: el expansor y el icono de bandeja quedan activos, pero la ventana principal no se crea hasta que el usuario abre la aplicacion.
+
 ## CSV
 
 La pantalla principal exporta un CSV global con todos los snippets y su coleccion:
@@ -140,4 +142,4 @@ En archivos sin encabezado, la tercera columna se trata como etiqueta del snippe
 
 ## Nota tecnica
 
-`uiohook-napi` escucha el texto escrito y Electron registra `TAB` como atajo global cuando la expansion esta activa. Asi el foco no avanza a otro campo antes de borrar la abreviatura y pegar el reemplazo.
+`uiohook-napi` escucha el texto escrito y permite activar la expansion con `Shift`, doble `Shift` o de forma automatica. Las combinaciones como `Shift+A` o `Shift+1` se reconocen como escritura normal y no activan snippets. En Windows, la abreviatura se interpreta con la distribucion de teclado de la ventana activa.

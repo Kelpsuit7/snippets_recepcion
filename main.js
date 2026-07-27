@@ -1,31 +1,139 @@
 const electron = require('electron');
 const { uIOhook, UiohookKey } = require('uiohook-napi');
 const { keyboard, Key } = require('@nut-tree-fork/nut-js');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const {
+  csvEscape,
+  findBestMatchingSnippet,
+  normalizeActivationMode,
+  normalizeForMatch,
+  parseCsv,
+  resolveShiftActivation,
+} = require('./lib/snippet-core');
 
 const {
   app,
   BrowserWindow,
   clipboard,
   dialog,
-  globalShortcut,
   Menu,
   screen,
+  Tray,
 } = electron;
 const ipcMain = electron.ipcMain || app.ipcMain;
 
+if (process.env.VETSNIPPETS_USER_DATA) {
+  app.setPath('userData', path.resolve(process.env.VETSNIPPETS_USER_DATA));
+}
+
 const MAX_BUFFER_LENGTH = 20;
-const SUGGESTION_WIDTH = 116;
+const SUGGESTION_WIDTH = 136;
 const SUGGESTION_HEIGHT = 34;
-const CARET_OFFSET_Y = 12;
+const CARET_OFFSET_Y = 6;
+const APPROXIMATE_CHARACTER_WIDTH = 8;
+const AUTOMATIC_EXPANSION_DELAY_MS = 300;
+const BACKSPACE_STEP_DELAY_MS = 8;
+const DOUBLE_SHIFT_WINDOW_MS = 450;
 const DEFAULT_SETTINGS = {
   expansionEnabled: true,
   showSuggestion: true,
+  activationMode: 'shift',
   theme: 'mint',
 };
 const VALID_THEMES = new Set(['mint', 'rose', 'sky', 'lavender', 'peach']);
+const KEYBOARD_TRANSLATION_TIMEOUT_MS = 120;
+const CARET_LOOKUP_TIMEOUT_MS = 1500;
+const MAX_DIAGNOSTIC_LOG_BYTES = 1024 * 1024;
+
+const WINDOWS_KEYBOARD_TRANSLATOR_SCRIPT = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class KeyboardLayoutNative {
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetForegroundWindow();
+
+  [DllImport("user32.dll")]
+  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetKeyboardLayout(uint idThread);
+
+  [DllImport("user32.dll")]
+  public static extern uint MapVirtualKeyEx(uint uCode, uint uMapType, IntPtr dwhkl);
+
+  [DllImport("user32.dll")]
+  public static extern short GetKeyState(int nVirtKey);
+
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern int ToUnicodeEx(
+    uint wVirtKey,
+    uint wScanCode,
+    byte[] lpKeyState,
+    StringBuilder pwszBuff,
+    int cchBuff,
+    uint wFlags,
+    IntPtr dwhkl
+  );
+}
+"@
+
+while (($line = [Console]::In.ReadLine()) -ne $null) {
+  $requestId = ''
+
+  try {
+    $parts = $line.Split('|')
+    $requestId = $parts[0]
+    $scanCode = [uint32]::Parse($parts[1])
+    $shift = $parts[2] -eq '1'
+    $control = $parts[3] -eq '1'
+    $alt = $parts[4] -eq '1'
+    $foregroundWindow = [KeyboardLayoutNative]::GetForegroundWindow()
+    $threadId = [KeyboardLayoutNative]::GetWindowThreadProcessId(
+      $foregroundWindow,
+      [IntPtr]::Zero
+    )
+    $layout = [KeyboardLayoutNative]::GetKeyboardLayout($threadId)
+    $virtualKey = [KeyboardLayoutNative]::MapVirtualKeyEx($scanCode, 3, $layout)
+    $keyboardState = [byte[]]::new(256)
+
+    if ($shift) {
+      $keyboardState[0x10] = 0x80
+    }
+    if ($control) {
+      $keyboardState[0x11] = 0x80
+    }
+    if ($alt) {
+      $keyboardState[0x12] = 0x80
+    }
+    if (([KeyboardLayoutNative]::GetKeyState(0x14) -band 1) -ne 0) {
+      $keyboardState[0x14] = 1
+    }
+
+    $buffer = [Text.StringBuilder]::new(8)
+    $length = [KeyboardLayoutNative]::ToUnicodeEx(
+      $virtualKey,
+      $scanCode,
+      $keyboardState,
+      $buffer,
+      $buffer.Capacity,
+      0,
+      $layout
+    )
+    $text = if ($length -gt 0) { $buffer.ToString(0, $length) } else { '' }
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text))
+    [Console]::Out.WriteLine("$requestId|$encoded")
+    [Console]::Out.Flush()
+  } catch {
+    [Console]::Out.WriteLine("$requestId|")
+    [Console]::Out.Flush()
+  }
+}
+`;
 
 const WINDOWS_CARET_POSITION_SCRIPT = `
 Add-Type @"
@@ -65,18 +173,281 @@ public static class CaretNative {
 
   [DllImport("user32.dll")]
   public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetForegroundWindow();
+
+  [DllImport("user32.dll")]
+  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+
+  [DllImport("kernel32.dll")]
+  public static extern uint GetCurrentThreadId();
+
+  [DllImport("user32.dll")]
+  public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetFocus();
+
+  [DllImport("user32.dll")]
+  public static extern bool GetCaretPos(ref POINT point);
+
+  [DllImport("user32.dll")]
+  public static extern bool SetProcessDPIAware();
+
+  [DllImport("user32.dll")]
+  public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+  [DllImport("oleacc.dll")]
+  public static extern int AccessibleObjectFromWindow(
+    IntPtr hWnd,
+    uint objectId,
+    ref Guid interfaceId,
+    [MarshalAs(UnmanagedType.Interface)] out object accessibleObject
+  );
 }
 "@
+
+[void][CaretNative]::SetProcessDPIAware()
+$foregroundWindow = [CaretNative]::GetForegroundWindow()
+$foregroundBounds = New-Object CaretNative+RECT
+$hasForegroundBounds = (
+  $foregroundWindow -ne [IntPtr]::Zero -and
+  [CaretNative]::GetWindowRect($foregroundWindow, [ref]$foregroundBounds)
+)
+$focusedTextBounds = $null
+
+try {
+  Add-Type -AssemblyName UIAutomationClient
+  $focusedTextElement = [System.Windows.Automation.AutomationElement]::FocusedElement
+
+  if (
+    $null -ne $focusedTextElement -and
+    $focusedTextElement.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit
+  ) {
+    $candidateBounds = $focusedTextElement.Current.BoundingRectangle
+    if ($candidateBounds.Width -gt 0 -and $candidateBounds.Height -gt 0) {
+      $focusedTextBounds = $candidateBounds
+    }
+  }
+} catch {
+  $focusedTextBounds = $null
+}
+
+function Test-CaretPoint([double]$x, [double]$y) {
+  if (
+    $null -ne $focusedTextBounds -and
+    (
+      $x -lt $focusedTextBounds.Left -or
+      $x -gt $focusedTextBounds.Right -or
+      $y -lt $focusedTextBounds.Top -or
+      $y -gt $focusedTextBounds.Bottom
+    )
+  ) {
+    return $false
+  }
+
+  if (-not $hasForegroundBounds) {
+    return $x -ge 0 -and $y -ge 0
+  }
+
+  return (
+    $x -ge $foregroundBounds.Left -and
+    $x -le $foregroundBounds.Right -and
+    $y -ge $foregroundBounds.Top -and
+    $y -le $foregroundBounds.Bottom
+  )
+}
 
 $info = New-Object CaretNative+GUITHREADINFO
 $info.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([type]'CaretNative+GUITHREADINFO')
 
-if ([CaretNative]::GetGUIThreadInfo(0, [ref]$info) -and $info.hwndCaret -ne [IntPtr]::Zero) {
+if ([CaretNative]::GetGUIThreadInfo(0, [ref]$info)) {
   $point = New-Object CaretNative+POINT
   $point.X = $info.rcCaret.Left
   $point.Y = $info.rcCaret.Top
-  [void][CaretNative]::ClientToScreen($info.hwndCaret, [ref]$point)
-  "$($point.X),$($point.Y)"
+
+  if (
+    $info.hwndCaret -ne [IntPtr]::Zero -and
+    [CaretNative]::ClientToScreen($info.hwndCaret, [ref]$point) -and
+    (Test-CaretPoint $point.X $point.Y)
+  ) {
+    "$($point.X),$($point.Y)"
+    exit
+  }
+}
+
+$foregroundThread = [CaretNative]::GetWindowThreadProcessId($foregroundWindow, [IntPtr]::Zero)
+$currentThread = [CaretNative]::GetCurrentThreadId()
+
+if ($foregroundThread -ne 0 -and [CaretNative]::AttachThreadInput($currentThread, $foregroundThread, $true)) {
+  try {
+    $focusWindow = [CaretNative]::GetFocus()
+    $point = New-Object CaretNative+POINT
+
+    $hasCaretPoint = [CaretNative]::GetCaretPos([ref]$point) -and ($point.X -ne 0 -or $point.Y -ne 0)
+
+    if (
+      $focusWindow -ne [IntPtr]::Zero -and
+      $hasCaretPoint -and
+      [CaretNative]::ClientToScreen($focusWindow, [ref]$point) -and
+      (Test-CaretPoint $point.X $point.Y)
+    ) {
+      "$($point.X),$($point.Y)"
+      exit
+    }
+  } finally {
+    [void][CaretNative]::AttachThreadInput($currentThread, $foregroundThread, $false)
+  }
+}
+
+try {
+  $accessibleId = [Guid]'618736e0-3c3d-11cf-810c-00aa00389b71'
+  $accessibleObject = $null
+  $caretObjectId = [uint32]0xFFFFFFF8
+  $accessibleResult = [CaretNative]::AccessibleObjectFromWindow(
+    $foregroundWindow,
+    $caretObjectId,
+    [ref]$accessibleId,
+    [ref]$accessibleObject
+  )
+
+  if ($accessibleResult -eq 0 -and $null -ne $accessibleObject) {
+    $left = 0
+    $top = 0
+    $width = 0
+    $height = 0
+    $accessibleObject.accLocation([ref]$left, [ref]$top, [ref]$width, [ref]$height, 0)
+    $caretX = $left + [Math]::Max($width, 1)
+    $hasCaretDimensions = $width -ge 0 -and $width -le 20 -and $height -ge 5 -and $height -le 120
+
+    if ($hasCaretDimensions -and (Test-CaretPoint $caretX $top)) {
+      "$caretX,$top"
+      exit
+    }
+  }
+} catch {
+  # MSAA no esta disponible en todas las aplicaciones.
+}
+
+try {
+  Add-Type -AssemblyName UIAutomationClient
+  $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
+  $textPattern2 = $null
+
+  if ($null -ne $focusedElement -and $focusedElement.TryGetCurrentPattern([System.Windows.Automation.TextPattern2]::Pattern, [ref]$textPattern2)) {
+    $isActive = $false
+    $caretRange = $textPattern2.GetCaretRange([ref]$isActive)
+    $rectangles = $caretRange.GetBoundingRectangles()
+    $useRightEdge = $false
+
+    if ($rectangles.Length -lt 4) {
+      $expandedRange = $caretRange.Clone()
+      $moved = $expandedRange.MoveEndpointByUnit(
+        [System.Windows.Automation.TextPatternRangeEndpoint]::Start,
+        [System.Windows.Automation.TextUnit]::Character,
+        -1
+      )
+      $rectangles = $expandedRange.GetBoundingRectangles()
+      $useRightEdge = $moved -ne 0
+    }
+
+    if ($rectangles.Length -ge 4) {
+      $lastRectangle = $rectangles.Length - 4
+      $caretX = [Math]::Round(
+        $rectangles[$lastRectangle] +
+        $(if ($useRightEdge) { $rectangles[$lastRectangle + 2] } else { 0 })
+      )
+      $caretY = [Math]::Round($rectangles[$lastRectangle + 1])
+      if (Test-CaretPoint $caretX $caretY) {
+        "$caretX,$caretY"
+        exit
+      }
+    }
+  }
+} catch {
+  # TextPattern2 no esta disponible en todas las versiones o controles.
+}
+
+try {
+  Add-Type -AssemblyName UIAutomationClient
+  $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
+  $textPattern = $null
+
+  if ($null -ne $focusedElement -and $focusedElement.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$textPattern)) {
+    $selection = $textPattern.GetSelection()
+
+    if ($selection.Count -gt 0) {
+      $caretRange = $selection[0].Clone()
+      [void]$caretRange.MoveEndpointByUnit(
+        [System.Windows.Automation.TextPatternRangeEndpoint]::Start,
+        [System.Windows.Automation.TextUnit]::Character,
+        -1
+      )
+      $rectangles = $caretRange.GetBoundingRectangles()
+
+      if ($rectangles.Length -ge 4) {
+        $lastRectangle = $rectangles.Length - 4
+        $caretX = [Math]::Round($rectangles[$lastRectangle] + $rectangles[$lastRectangle + 2])
+        $caretY = [Math]::Round($rectangles[$lastRectangle + 1])
+        if (Test-CaretPoint $caretX $caretY) {
+          "$caretX,$caretY"
+          exit
+        }
+      }
+    }
+  }
+
+} catch {
+  # Algunas aplicaciones no exponen un patron de texto mediante UI Automation.
+}
+
+try {
+  $valuePattern = $null
+
+  if (
+    $null -ne $focusedTextElement -and
+    $null -ne $focusedTextBounds -and
+    $focusedTextElement.TryGetCurrentPattern(
+      [System.Windows.Automation.ValuePattern]::Pattern,
+      [ref]$valuePattern
+    )
+  ) {
+    $value = [string]$valuePattern.Current.Value
+    $logicalLines = $value -split "\r?\n"
+    $lastLine = if ($logicalLines.Count -gt 0) {
+      $logicalLines[$logicalLines.Count - 1]
+    } else {
+      ''
+    }
+    $horizontalPadding = 7
+    $verticalPadding = 7
+    $characterWidth = 8
+    $lineHeight = 20
+    $usableWidth = [Math]::Max($focusedTextBounds.Width - ($horizontalPadding * 2), $characterWidth)
+    $charactersPerLine = [Math]::Max([Math]::Floor($usableWidth / $characterWidth), 1)
+    $wrappedLine = [Math]::Floor($lastLine.Length / $charactersPerLine)
+    $lineStart = $wrappedLine * $charactersPerLine
+    $column = $lastLine.Length - $lineStart
+    $caretX = [Math]::Round(
+      $focusedTextBounds.Left +
+      $horizontalPadding +
+      [Math]::Min($column * $characterWidth, $usableWidth)
+    )
+    $caretY = [Math]::Round(
+      [Math]::Min(
+        $focusedTextBounds.Top + $verticalPadding + ($wrappedLine * $lineHeight),
+        $focusedTextBounds.Bottom - $verticalPadding
+      )
+    )
+
+    if (Test-CaretPoint $caretX $caretY) {
+      "$caretX,$caretY"
+      exit
+    }
+  }
+} catch {
+  # Respaldo limitado al contenido y limites del editor enfocado.
 }
 `;
 
@@ -84,19 +455,89 @@ keyboard.config.autoDelayMs = 0;
 
 let mainWindow = null;
 let suggestionWindow = null;
+let tray = null;
+let isQuitting = false;
 let snippets = [];
 let collections = [];
 let settings = { ...DEFAULT_SETTINGS };
 let keyboardBuffer = '';
 let isExpandingSnippet = false;
-let isForwardingTab = false;
 let listenerStarted = false;
-let tabShortcutRegistered = false;
+const activeShiftKeys = new Set();
+let shiftChordUsed = false;
+let lastCleanShiftReleaseAt = 0;
 let devReloadTimer = null;
 let snippetsPath = '';
 let collectionsPath = '';
 let settingsPath = '';
+let diagnosticsPath = '';
 let pendingCsvImport = null;
+let automaticExpansionTimer = null;
+let rendererCaretPosition = null;
+let suggestionUpdateTimer = null;
+let keyboardTranslatorProcess = null;
+let keyboardTranslatorOutput = '';
+let keyboardTranslationRequestId = 0;
+let inputEventQueue = Promise.resolve();
+const pendingKeyboardTranslations = new Map();
+let caretTrackerProcess = null;
+let caretTrackerOutput = '';
+let caretLookupRequestId = 0;
+let hasLoggedCaretLookupResult = false;
+const pendingCaretLookups = new Map();
+
+function getDiagnosticsPath() {
+  if (!diagnosticsPath) {
+    diagnosticsPath = path.join(app.getPath('userData'), 'diagnostics.log');
+  }
+
+  return diagnosticsPath;
+}
+
+function normalizeDiagnosticDetails(details) {
+  return Object.fromEntries(
+    Object.entries(details).map(([key, value]) => {
+      if (value instanceof Error) {
+        return [key, {
+          name: value.name,
+          message: value.message,
+          stack: value.stack,
+        }];
+      }
+
+      return [key, value];
+    })
+  );
+}
+
+function writeDiagnostic(event, details = {}) {
+  try {
+    const filePath = getDiagnosticsPath();
+    const backupPath = `${filePath}.1`;
+
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+
+    if (
+      fs.existsSync(filePath)
+      && fs.statSync(filePath).size >= MAX_DIAGNOSTIC_LOG_BYTES
+    ) {
+      fs.rmSync(backupPath, { force: true });
+      fs.renameSync(filePath, backupPath);
+    }
+
+    fs.appendFileSync(
+      filePath,
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        event,
+        ...normalizeDiagnosticDetails(details),
+      })}\n`,
+      'utf8'
+    );
+  } catch (error) {
+    console.error('No se pudo escribir el diagnostico:', error);
+  }
+}
 
 function keyCode(names, fallback) {
   const candidates = Array.isArray(names) ? names : [names];
@@ -125,7 +566,8 @@ const KEY = {
   Minus: keyCode('Minus', 12),
   Equal: keyCode(['Equal', 'Equals'], 13),
   Backspace: keyCode('Backspace', 14),
-  Tab: keyCode('Tab', 15),
+  ShiftLeft: keyCode(['Shift', 'ShiftLeft', 'LeftShift'], 42),
+  ShiftRight: keyCode(['ShiftRight', 'RightShift'], 54),
   BracketLeft: keyCode(['BracketLeft', 'OpenBracket'], 26),
   BracketRight: keyCode(['BracketRight', 'CloseBracket'], 27),
   Enter: keyCode('Enter', 28),
@@ -137,12 +579,353 @@ const KEY = {
   Period: keyCode('Period', 52),
   Slash: keyCode('Slash', 53),
   Space: keyCode('Space', 57),
+  PageUp: keyCode('PageUp', 3657),
+  PageDown: keyCode('PageDown', 3665),
+  End: keyCode('End', 3663),
+  Home: keyCode('Home', 3655),
+  Insert: keyCode('Insert', 3666),
+  Delete: keyCode('Delete', 3667),
+  ArrowLeft: keyCode('ArrowLeft', 57419),
+  ArrowUp: keyCode('ArrowUp', 57416),
+  ArrowRight: keyCode('ArrowRight', 57421),
+  ArrowDown: keyCode('ArrowDown', 57424),
 };
+const CONTEXT_RESET_KEYS = new Set([
+  KEY.PageUp,
+  KEY.PageDown,
+  KEY.End,
+  KEY.Home,
+  KEY.Insert,
+  KEY.Delete,
+  KEY.ArrowLeft,
+  KEY.ArrowUp,
+  KEY.ArrowRight,
+  KEY.ArrowDown,
+]);
 
-function createWindow() {
+function stopKeyboardTranslator() {
+  if (keyboardTranslatorProcess) {
+    keyboardTranslatorProcess.kill();
+    keyboardTranslatorProcess = null;
+  }
+
+  pendingKeyboardTranslations.forEach(({ resolve, timer, event }) => {
+    clearTimeout(timer);
+    resolve(fallbackKeycodeToCharacter(event));
+  });
+  pendingKeyboardTranslations.clear();
+  keyboardTranslatorOutput = '';
+}
+
+function handleKeyboardTranslatorOutput(chunk) {
+  keyboardTranslatorOutput += chunk.toString('utf8');
+  const lines = keyboardTranslatorOutput.split(/\r?\n/);
+  keyboardTranslatorOutput = lines.pop() || '';
+
+  lines.forEach((line) => {
+    const separatorIndex = line.indexOf('|');
+
+    if (separatorIndex < 0) {
+      return;
+    }
+
+    const requestId = line.slice(0, separatorIndex);
+    const pending = pendingKeyboardTranslations.get(requestId);
+
+    if (!pending) {
+      return;
+    }
+
+    pendingKeyboardTranslations.delete(requestId);
+    clearTimeout(pending.timer);
+
+    try {
+      const encodedCharacter = line.slice(separatorIndex + 1);
+      pending.resolve(Buffer.from(encodedCharacter, 'base64').toString('utf8'));
+    } catch (error) {
+      pending.resolve(fallbackKeycodeToCharacter(pending.event));
+    }
+  });
+}
+
+function startKeyboardTranslator() {
+  if (process.platform !== 'win32' || keyboardTranslatorProcess) {
+    return;
+  }
+
+  try {
+    const translator = spawn(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        WINDOWS_KEYBOARD_TRANSLATOR_SCRIPT,
+      ],
+      {
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'ignore'],
+      }
+    );
+
+    keyboardTranslatorProcess = translator;
+    writeDiagnostic('keyboard-translator-started');
+    translator.stdout.on('data', handleKeyboardTranslatorOutput);
+    translator.on('error', (error) => {
+      console.error('No se pudo iniciar el traductor de teclado:', error);
+      writeDiagnostic('keyboard-translator-error', { error });
+      stopKeyboardTranslator();
+    });
+    translator.on('exit', (code, signal) => {
+      if (keyboardTranslatorProcess === translator) {
+        writeDiagnostic('keyboard-translator-exit', { code, signal });
+        stopKeyboardTranslator();
+      }
+    });
+  } catch (error) {
+    console.error('No se pudo iniciar el traductor de teclado:', error);
+    writeDiagnostic('keyboard-translator-error', { error });
+    stopKeyboardTranslator();
+  }
+}
+
+function translateKeyEvent(event) {
+  if (
+    process.platform !== 'win32'
+    || !keyboardTranslatorProcess
+    || !keyboardTranslatorProcess.stdin.writable
+  ) {
+    return Promise.resolve(fallbackKeycodeToCharacter(event));
+  }
+
+  keyboardTranslationRequestId += 1;
+  const requestId = String(keyboardTranslationRequestId);
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingKeyboardTranslations.delete(requestId);
+      resolve(fallbackKeycodeToCharacter(event));
+    }, KEYBOARD_TRANSLATION_TIMEOUT_MS);
+
+    pendingKeyboardTranslations.set(requestId, { resolve, timer, event });
+
+    keyboardTranslatorProcess.stdin.write([
+      requestId,
+      event.keycode,
+      event.shiftKey ? 1 : 0,
+      event.ctrlKey ? 1 : 0,
+      event.altKey ? 1 : 0,
+    ].join('|') + '\n', (error) => {
+      if (!error) {
+        return;
+      }
+
+      const pending = pendingKeyboardTranslations.get(requestId);
+      if (pending) {
+        pendingKeyboardTranslations.delete(requestId);
+        clearTimeout(pending.timer);
+        pending.resolve(fallbackKeycodeToCharacter(event));
+      }
+    });
+  });
+}
+
+function enqueueInputEvent(handler, event) {
+  inputEventQueue = inputEventQueue
+    .then(() => handler(event))
+    .catch((error) => {
+      console.error('No se pudo procesar una entrada global:', error);
+    });
+}
+
+function buildWindowsCaretTrackerScript() {
+  const lookupMarker = '[void][CaretNative]::SetProcessDPIAware()';
+  const markerIndex = WINDOWS_CARET_POSITION_SCRIPT.indexOf(lookupMarker);
+
+  if (markerIndex < 0) {
+    throw new Error('No se encontro el bloque de consulta del cursor.');
+  }
+
+  const nativeDefinition = WINDOWS_CARET_POSITION_SCRIPT.slice(0, markerIndex);
+  const lookupScript = WINDOWS_CARET_POSITION_SCRIPT
+    .slice(markerIndex)
+    .replace(/\bexit\b/g, 'return');
+
+  return `${nativeDefinition}
+while (($requestId = [Console]::In.ReadLine()) -ne $null) {
+  try {
+    $point = & {
+${lookupScript}
+    } | Select-Object -First 1
+    [Console]::Out.WriteLine("$requestId|$point")
+    [Console]::Out.Flush()
+  } catch {
+    [Console]::Out.WriteLine("$requestId|")
+    [Console]::Out.Flush()
+  }
+}`;
+}
+
+function stopCaretTracker() {
+  if (caretTrackerProcess) {
+    caretTrackerProcess.kill();
+    caretTrackerProcess = null;
+  }
+
+  pendingCaretLookups.forEach(({ resolve, timer }) => {
+    clearTimeout(timer);
+    resolve(null);
+  });
+  pendingCaretLookups.clear();
+  caretTrackerOutput = '';
+}
+
+function handleCaretTrackerOutput(chunk) {
+  caretTrackerOutput += chunk.toString('utf8');
+  const lines = caretTrackerOutput.split(/\r?\n/);
+  caretTrackerOutput = lines.pop() || '';
+
+  lines.forEach((line) => {
+    const separatorIndex = line.indexOf('|');
+
+    if (separatorIndex < 0) {
+      return;
+    }
+
+    const requestId = line.slice(0, separatorIndex);
+    const pending = pendingCaretLookups.get(requestId);
+
+    if (!pending) {
+      return;
+    }
+
+    pendingCaretLookups.delete(requestId);
+    clearTimeout(pending.timer);
+    const [x, y] = line
+      .slice(separatorIndex + 1)
+      .split(',')
+      .map((value) => Number.parseInt(value, 10));
+    const point = Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+
+    if (!hasLoggedCaretLookupResult) {
+      hasLoggedCaretLookupResult = true;
+      writeDiagnostic('caret-lookup-result', { found: Boolean(point) });
+    }
+
+    pending.resolve(point);
+  });
+}
+
+function startCaretTracker() {
+  if (process.platform !== 'win32' || caretTrackerProcess) {
+    return;
+  }
+
+  try {
+    const tracker = spawn(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        buildWindowsCaretTrackerScript(),
+      ],
+      {
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'ignore'],
+      }
+    );
+
+    caretTrackerProcess = tracker;
+    writeDiagnostic('caret-tracker-started');
+    tracker.stdout.on('data', handleCaretTrackerOutput);
+    tracker.on('error', (error) => {
+      console.error('No se pudo iniciar el detector de cursor:', error);
+      writeDiagnostic('caret-tracker-error', { error });
+      stopCaretTracker();
+    });
+    tracker.on('exit', (code, signal) => {
+      if (caretTrackerProcess === tracker) {
+        writeDiagnostic('caret-tracker-exit', { code, signal });
+        stopCaretTracker();
+      }
+    });
+  } catch (error) {
+    console.error('No se pudo iniciar el detector de cursor:', error);
+    writeDiagnostic('caret-tracker-error', { error });
+    stopCaretTracker();
+  }
+}
+
+function requestTextCaretScreenPoint() {
+  if (
+    process.platform !== 'win32'
+    || !caretTrackerProcess
+    || !caretTrackerProcess.stdin.writable
+  ) {
+    return Promise.resolve(null);
+  }
+
+  caretLookupRequestId += 1;
+  const requestId = String(caretLookupRequestId);
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingCaretLookups.delete(requestId);
+      if (!hasLoggedCaretLookupResult) {
+        hasLoggedCaretLookupResult = true;
+        writeDiagnostic('caret-lookup-result', {
+          found: false,
+          reason: 'timeout',
+        });
+      }
+      resolve(null);
+    }, CARET_LOOKUP_TIMEOUT_MS);
+
+    pendingCaretLookups.set(requestId, { resolve, timer });
+    caretTrackerProcess.stdin.write(`${requestId}\n`, (error) => {
+      if (!error) {
+        return;
+      }
+
+      const pending = pendingCaretLookups.get(requestId);
+      if (pending) {
+        pendingCaretLookups.delete(requestId);
+        clearTimeout(pending.timer);
+        pending.resolve(null);
+      }
+    });
+  });
+}
+
+function showMainWindow() {
+  if (!app.isReady()) {
+    app.once('ready', showMainWindow);
+    return;
+  }
+
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow({ show: true });
+    return;
+  }
+
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function createWindow({ show = true } = {}) {
   Menu.setApplicationMenu(null);
 
   mainWindow = new BrowserWindow({
+    show,
     width: 1040,
     height: 720,
     minWidth: 780,
@@ -153,11 +936,45 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
+      webSecurity: true,
     },
   });
 
   mainWindow.setMenu(null);
   mainWindow.loadFile('index.html');
+  mainWindow.on('close', (event) => {
+    if (isQuitting) {
+      return;
+    }
+
+    event.preventDefault();
+    mainWindow.hide();
+  });
+}
+
+function createTray() {
+  if (tray) {
+    return;
+  }
+
+  tray = new Tray(path.join(__dirname, process.platform === 'darwin' ? '2.icns' : '2.ico'));
+  tray.setToolTip('VetSnippets - Snippets activos');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    {
+      label: 'Abrir VetSnippets',
+      click: showMainWindow,
+    },
+    { type: 'separator' },
+    {
+      label: 'Salir',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    },
+  ]));
+  tray.on('click', showMainWindow);
 }
 
 function createSuggestionWindow() {
@@ -180,6 +997,8 @@ function createSuggestionWindow() {
       preload: path.join(__dirname, 'tooltip-preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
+      webSecurity: true,
     },
   });
 
@@ -219,6 +1038,7 @@ function startDevelopmentReload() {
     'renderer.js',
     'preload.js',
     'snippet-tooltip.html',
+    'snippet-tooltip.js',
     'tooltip-preload.js',
   ].forEach((fileName) => {
     fs.watchFile(
@@ -234,22 +1054,71 @@ function startDevelopmentReload() {
 }
 
 function enableOpenAtLogin() {
-  if (!app.isPackaged || !['darwin', 'win32'].includes(process.platform)) {
+  if (process.env.VETSNIPPETS_DISABLE_STARTUP === '1') {
+    return;
+  }
+
+  if (!['darwin', 'win32'].includes(process.platform)) {
     return;
   }
 
   try {
-    const loginSettings = {
-      openAtLogin: true,
-    };
-
-    if (process.platform === 'win32') {
-      loginSettings.path = process.execPath;
+    if (process.platform === 'win32' && !app.isPackaged) {
+      const startupCommand = `"${process.execPath}" "${app.getAppPath()}" --background`;
+      execFileSync(
+        'reg.exe',
+        [
+          'add',
+          'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run',
+          '/v',
+          'VetSnippets',
+          '/t',
+          'REG_SZ',
+          '/d',
+          startupCommand,
+          '/f',
+        ],
+        { windowsHide: true }
+      );
+      writeDiagnostic('startup-registration-updated', {
+        platform: process.platform,
+        packaged: false,
+        background: true,
+      });
+      return;
     }
 
+    if (!app.isPackaged) {
+      return;
+    }
+
+    const loginSettings = process.platform === 'win32'
+      ? {
+        openAtLogin: true,
+        path: process.execPath,
+        args: ['--background'],
+        enabled: true,
+        name: 'VetSnippets',
+      }
+      : { openAtLogin: true };
+
     app.setLoginItemSettings(loginSettings);
+    writeDiagnostic('startup-registration-updated', {
+      platform: process.platform,
+      packaged: true,
+      background: process.platform === 'win32',
+    });
+    const currentSettings = app.getLoginItemSettings({
+      path: loginSettings.path,
+      args: loginSettings.args,
+    });
+
+    if (!currentSettings.openAtLogin) {
+      console.error('Windows no confirmo el inicio automatico de VetSnippets.');
+    }
   } catch (error) {
     console.error('No se pudo activar el inicio automatico:', error);
+    writeDiagnostic('startup-registration-error', { error });
   }
 }
 
@@ -268,20 +1137,12 @@ function removeLastBufferCharacter() {
   keyboardBuffer = keyboardBuffer.slice(0, -1);
 }
 
-function normalizeForMatch(value) {
-  return String(value || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLocaleLowerCase();
-}
-
 function findMatchingSnippet() {
-  const normalizedBuffer = normalizeForMatch(keyboardBuffer);
-
-  return snippets.find((snippet) => (
-    isSnippetCollectionEnabled(snippet)
-    && normalizedBuffer.endsWith(normalizeForMatch(snippet.trigger))
-  ));
+  return findBestMatchingSnippet(
+    keyboardBuffer,
+    snippets,
+    isSnippetCollectionEnabled
+  );
 }
 
 function isSnippetCollectionEnabled(snippet) {
@@ -294,10 +1155,19 @@ function isSnippetCollectionEnabled(snippet) {
 }
 
 function createCollectionId(name) {
-  return normalizeForMatch(name)
+  const baseId = normalizeForMatch(name)
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
     || `coleccion-${Date.now()}`;
+  let id = baseId;
+  let suffix = 2;
+
+  while (collections.some((collection) => collection.id === id)) {
+    id = `${baseId}-${suffix}`;
+    suffix += 1;
+  }
+
+  return id;
 }
 
 function normalizeCollection(collection) {
@@ -316,47 +1186,33 @@ function hideSnippetSuggestion() {
   }
 }
 
-function getTextCaretScreenPoint() {
-  if (process.platform !== 'win32') {
-    return null;
+async function getSnippetSuggestionAnchor() {
+  if (
+    rendererCaretPosition
+    && mainWindow
+    && !mainWindow.isDestroyed()
+    && mainWindow.isFocused()
+    && Date.now() - rendererCaretPosition.updatedAt < 2000
+  ) {
+    const contentBounds = mainWindow.getContentBounds();
+
+    return {
+      x: Math.round(contentBounds.x + rendererCaretPosition.x),
+      y: Math.round(contentBounds.y + rendererCaretPosition.y),
+    };
   }
 
-  try {
-    const output = execFileSync(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        WINDOWS_CARET_POSITION_SCRIPT,
-      ],
-      {
-        encoding: 'utf8',
-        timeout: 500,
-        windowsHide: true,
-      }
-    ).trim();
+  const systemCaretPosition = await requestTextCaretScreenPoint();
 
-    const [x, y] = output.split(',').map((value) => Number.parseInt(value, 10));
-
-    if (Number.isFinite(x) && Number.isFinite(y)) {
-      return { x, y };
-    }
-  } catch (error) {
-    return null;
+  if (systemCaretPosition) {
+    return screen.screenToDipPoint(systemCaretPosition);
   }
 
   return null;
 }
 
-function getSnippetSuggestionAnchor() {
-  return getTextCaretScreenPoint() || screen.getCursorScreenPoint();
-}
-
-function showSnippetSuggestion(snippet) {
-  if (!settings.showSuggestion) {
+async function showSnippetSuggestion(snippet) {
+  if (!settings.showSuggestion || settings.activationMode === 'automatic') {
     hideSnippetSuggestion();
     return;
   }
@@ -365,11 +1221,21 @@ function showSnippetSuggestion(snippet) {
     return;
   }
 
-  const anchor = getSnippetSuggestionAnchor();
+  const anchor = await getSnippetSuggestionAnchor();
+
+  if (!anchor || findMatchingSnippet() !== snippet) {
+    hideSnippetSuggestion();
+    return;
+  }
+
   const display = screen.getDisplayNearestPoint(anchor);
   const workArea = display.workArea;
+  const wordCenterX = anchor.x - Math.min(
+    snippet.trigger.length * APPROXIMATE_CHARACTER_WIDTH,
+    SUGGESTION_WIDTH
+  ) / 2;
   const x = Math.min(
-    Math.max(anchor.x - Math.round(SUGGESTION_WIDTH / 2), workArea.x),
+    Math.max(Math.round(wordCenterX - SUGGESTION_WIDTH / 2), workArea.x),
     workArea.x + workArea.width - SUGGESTION_WIDTH
   );
   const y = Math.min(
@@ -384,115 +1250,59 @@ function showSnippetSuggestion(snippet) {
     height: SUGGESTION_HEIGHT,
   });
 
+  suggestionWindow.hide();
   suggestionWindow.webContents.send('snippet:detected', {
     trigger: snippet.trigger,
+    activationMode: settings.activationMode,
+    theme: settings.theme,
   });
-  suggestionWindow.showInactive();
 }
 
-function updateSnippetSuggestion() {
+async function updateSnippetSuggestion() {
   const matchingSnippet = findMatchingSnippet();
 
   if (!matchingSnippet) {
     hideSnippetSuggestion();
+    return null;
+  }
+
+  await showSnippetSuggestion(matchingSnippet);
+  return matchingSnippet;
+}
+
+function clearAutomaticExpansionTimer() {
+  clearTimeout(automaticExpansionTimer);
+  automaticExpansionTimer = null;
+}
+
+function scheduleAutomaticExpansion(snippet) {
+  clearAutomaticExpansionTimer();
+
+  if (settings.activationMode !== 'automatic' || !snippet) {
     return;
   }
 
-  showSnippetSuggestion(matchingSnippet);
+  automaticExpansionTimer = setTimeout(() => {
+    automaticExpansionTimer = null;
+
+    if (!isExpandingSnippet && findMatchingSnippet() === snippet) {
+      runSnippetExpansion(snippet);
+    }
+  }, AUTOMATIC_EXPANSION_DELAY_MS);
+}
+
+function scheduleSnippetSuggestionUpdate() {
+  clearTimeout(suggestionUpdateTimer);
+  suggestionUpdateTimer = setTimeout(() => {
+    suggestionUpdateTimer = null;
+    void updateSnippetSuggestion();
+  }, 75);
 }
 
 function delay(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
-}
-
-function detectCsvDelimiter(line) {
-  let commaCount = 0;
-  let semicolonCount = 0;
-  let inQuotes = false;
-
-  for (let index = 0; index < line.length; index += 1) {
-    const character = line[index];
-    const nextCharacter = line[index + 1];
-
-    if (character === '"' && nextCharacter === '"') {
-      index += 1;
-      continue;
-    }
-
-    if (character === '"') {
-      inQuotes = !inQuotes;
-      continue;
-    }
-
-    if (!inQuotes && character === ',') {
-      commaCount += 1;
-    }
-
-    if (!inQuotes && character === ';') {
-      semicolonCount += 1;
-    }
-  }
-
-  return semicolonCount > commaCount ? ';' : ',';
-}
-
-function parseCsv(text) {
-  const source = String(text || '').replace(/^\uFEFF/, '');
-  const delimiter = detectCsvDelimiter(source.split(/\r?\n/, 1)[0] || '');
-  const rows = [];
-  let row = [];
-  let field = '';
-  let inQuotes = false;
-
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index];
-    const nextCharacter = source[index + 1];
-
-    if (character === '"' && inQuotes && nextCharacter === '"') {
-      field += '"';
-      index += 1;
-      continue;
-    }
-
-    if (character === '"') {
-      inQuotes = !inQuotes;
-      continue;
-    }
-
-    if (!inQuotes && character === delimiter) {
-      row.push(field);
-      field = '';
-      continue;
-    }
-
-    if (!inQuotes && (character === '\n' || character === '\r')) {
-      if (character === '\r' && nextCharacter === '\n') {
-        index += 1;
-      }
-
-      row.push(field);
-      rows.push(row);
-      row = [];
-      field = '';
-      continue;
-    }
-
-    field += character;
-  }
-
-  if (field || row.length > 0) {
-    row.push(field);
-    rows.push(row);
-  }
-
-  return rows.filter((item) => item.some((cell) => String(cell || '').trim()));
-}
-
-function csvEscape(value) {
-  const text = String(value || '');
-  return `"${text.replace(/"/g, '""')}"`;
 }
 
 function buildSnippetsCsv() {
@@ -783,6 +1593,10 @@ function normalizeStoredSettings(value) {
     showSuggestion: typeof storedValue.showSuggestion === 'boolean'
       ? storedValue.showSuggestion
       : DEFAULT_SETTINGS.showSuggestion,
+    activationMode: normalizeActivationMode(
+      storedValue.activationMode,
+      DEFAULT_SETTINGS.activationMode
+    ),
     theme: VALID_THEMES.has(storedValue.theme)
       ? storedValue.theme
       : DEFAULT_SETTINGS.theme,
@@ -874,7 +1688,7 @@ function saveSettingsToDisk() {
   fs.renameSync(tempPath, filePath);
 }
 
-function keycodeToCharacter(event) {
+function fallbackKeycodeToCharacter(event) {
   const key = event.keycode;
   const shift = Boolean(event.shiftKey);
 
@@ -947,39 +1761,107 @@ function keycodeToCharacter(event) {
   return punctuationMap.get(key) || '';
 }
 
-async function pressBackspace(times) {
-  for (let index = 0; index < times; index += 1) {
-    await keyboard.pressKey(Key.Backspace);
-    await keyboard.releaseKey(Key.Backspace);
+async function selectPreviousCharacters(times) {
+  await keyboard.pressKey(Key.LeftShift);
+
+  try {
+    await delay(BACKSPACE_STEP_DELAY_MS);
+
+    for (let index = 0; index < times; index += 1) {
+      await keyboard.pressKey(Key.Left);
+      await keyboard.releaseKey(Key.Left);
+      await delay(BACKSPACE_STEP_DELAY_MS);
+    }
+  } finally {
+    await keyboard.releaseKey(Key.LeftShift);
+  }
+}
+
+function captureClipboard() {
+  const formats = clipboard.availableFormats();
+
+  if (formats.length === 0) {
+    return null;
+  }
+
+  const data = {};
+  const text = clipboard.readText();
+  const html = clipboard.readHTML();
+  const rtf = clipboard.readRTF();
+  const image = clipboard.readImage();
+  const bookmark = ['darwin', 'win32'].includes(process.platform)
+    ? clipboard.readBookmark()
+    : null;
+
+  if (text || formats.some((format) => /text|unicode/i.test(format))) {
+    data.text = text;
+  }
+  if (html) {
+    data.html = html;
+  }
+  if (rtf) {
+    data.rtf = rtf;
+  }
+  if (!image.isEmpty()) {
+    data.image = image;
+  }
+  if (bookmark?.url) {
+    data.text = bookmark.url;
+    data.bookmark = bookmark.title;
+  }
+
+  return Object.keys(data).length > 0 ? data : null;
+}
+
+function restoreClipboard(snapshot, injectedText) {
+  if (clipboard.readText() !== injectedText) {
+    return;
+  }
+
+  if (snapshot) {
+    clipboard.write(snapshot);
+  } else {
+    clipboard.clear();
   }
 }
 
 async function pasteClipboardText(text) {
+  const previousClipboard = captureClipboard();
   clipboard.writeText(text);
 
-  if (process.platform === 'darwin') {
-    await keyboard.pressKey(Key.LeftCmd, Key.V);
-    await keyboard.releaseKey(Key.LeftCmd, Key.V);
-    return;
+  try {
+    if (process.platform === 'darwin') {
+      await keyboard.pressKey(Key.LeftCmd, Key.V);
+      await keyboard.releaseKey(Key.LeftCmd, Key.V);
+    } else {
+      await keyboard.pressKey(Key.LeftControl, Key.V);
+      await keyboard.releaseKey(Key.LeftControl, Key.V);
+    }
+  } finally {
+    await delay(100);
+    restoreClipboard(previousClipboard, text);
   }
-
-  await keyboard.pressKey(Key.LeftControl, Key.V);
-  await keyboard.releaseKey(Key.LeftControl, Key.V);
 }
 
 async function expandSnippet(snippet) {
   isExpandingSnippet = true;
+  clearAutomaticExpansionTimer();
   hideSnippetSuggestion();
 
   try {
-    // El atajo global de TAB evita que el foco avance antes de llegar aqui.
-    await delay(4);
-    await pressBackspace(snippet.trigger.length);
+    // La expansion comienza despues de liberar la tecla de activacion.
+    await delay(BACKSPACE_STEP_DELAY_MS);
+    await selectPreviousCharacters(snippet.trigger.length);
+    await delay(BACKSPACE_STEP_DELAY_MS);
 
-    // El portapapeles conserva acentos, saltos de linea y textos largos.
+    // Pegar sobre la seleccion reemplaza toda la abreviatura de una sola vez.
     await pasteClipboardText(snippet.text);
 
     keyboardBuffer = '';
+    writeDiagnostic('expansion-succeeded', {
+      triggerLength: snippet.trigger.length,
+      activationMode: settings.activationMode,
+    });
   } finally {
     setTimeout(() => {
       isExpandingSnippet = false;
@@ -987,112 +1869,158 @@ async function expandSnippet(snippet) {
   }
 }
 
-function handleTabKey() {
-  const matchingSnippet = findMatchingSnippet();
+function runSnippetExpansion(snippet) {
+  void expandSnippet(snippet).catch((error) => {
+    console.error(`No se pudo expandir el snippet "${snippet.trigger}":`, error);
+    resetKeyboardContext();
+    writeDiagnostic('expansion-failed', {
+      error,
+      triggerLength: snippet.trigger.length,
+      activationMode: settings.activationMode,
+      platform: process.platform,
+    });
+    const message = `No se pudo expandir "${snippet.trigger}". Revisa los permisos de la aplicación de destino.`;
 
-  if (!matchingSnippet) {
-    hideSnippetSuggestion();
-    return;
-  }
-
-  void expandSnippet(matchingSnippet);
-}
-
-async function forwardTabKey() {
-  isForwardingTab = true;
-
-  try {
-    if (tabShortcutRegistered) {
-      globalShortcut.unregister('Tab');
-      tabShortcutRegistered = false;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('snippets:listener-error', message);
+    } else if (process.platform === 'win32' && tray) {
+      tray.displayBalloon({
+        title: 'VetSnippets',
+        content: message,
+      });
     }
-
-    await keyboard.pressKey(Key.Tab);
-    await keyboard.releaseKey(Key.Tab);
-  } finally {
-    setTimeout(() => {
-      isForwardingTab = false;
-      updateTabShortcutRegistration();
-    }, 20);
-  }
+  });
 }
 
-function handleTabShortcut() {
-  if (isExpandingSnippet || isForwardingTab || !settings.expansionEnabled) {
-    void forwardTabKey();
-    return;
-  }
-
-  const matchingSnippet = findMatchingSnippet();
-
-  if (!matchingSnippet) {
-    hideSnippetSuggestion();
-    void forwardTabKey();
-    return;
-  }
-
-  void expandSnippet(matchingSnippet);
+function isShiftKey(keycode) {
+  return keycode === KEY.ShiftLeft || keycode === KEY.ShiftRight;
 }
 
-function updateTabShortcutRegistration() {
-  if (!settings.expansionEnabled || isForwardingTab) {
-    if (tabShortcutRegistered) {
-      globalShortcut.unregister('Tab');
-      tabShortcutRegistered = false;
-    }
-
-    return;
-  }
-
-  if (tabShortcutRegistered) {
-    return;
-  }
-
-  tabShortcutRegistered = globalShortcut.register('Tab', handleTabShortcut);
-
-  if (!tabShortcutRegistered) {
-    console.error('No se pudo registrar TAB como atajo global.');
-  }
+function resetKeyboardContext() {
+  keyboardBuffer = '';
+  clearAutomaticExpansionTimer();
+  clearTimeout(suggestionUpdateTimer);
+  hideSnippetSuggestion();
 }
 
-function handleKeydown(event) {
+async function handleKeydown(event) {
   if (isExpandingSnippet) {
     return;
   }
 
   if (!settings.expansionEnabled) {
+    clearAutomaticExpansionTimer();
     hideSnippetSuggestion();
     keyboardBuffer = '';
     return;
   }
 
-  if (event.keycode === KEY.Tab) {
-    if (tabShortcutRegistered || isForwardingTab) {
-      return;
+  if (isShiftKey(event.keycode)) {
+    if (activeShiftKeys.size === 0) {
+      shiftChordUsed = false;
     }
 
-    handleTabKey();
+    activeShiftKeys.add(event.keycode);
+    clearAutomaticExpansionTimer();
+    return;
+  }
+
+  lastCleanShiftReleaseAt = 0;
+
+  if (activeShiftKeys.size > 0) {
+    shiftChordUsed = true;
+  }
+
+  const isAltGraph = (
+    process.platform === 'win32'
+    && event.ctrlKey
+    && event.altKey
+  );
+
+  if (event.metaKey || (!isAltGraph && (event.ctrlKey || event.altKey))) {
+    resetKeyboardContext();
+    return;
+  }
+
+  if (CONTEXT_RESET_KEYS.has(event.keycode)) {
+    resetKeyboardContext();
     return;
   }
 
   if (event.keycode === KEY.Backspace) {
+    clearAutomaticExpansionTimer();
     removeLastBufferCharacter();
-    updateSnippetSuggestion();
+    scheduleSnippetSuggestionUpdate();
+    scheduleAutomaticExpansion(findMatchingSnippet());
     return;
   }
 
   if (event.keycode === KEY.Enter || event.keycode === KEY.Escape) {
+    clearAutomaticExpansionTimer();
     keyboardBuffer = '';
     hideSnippetSuggestion();
     return;
   }
 
-  const character = keycodeToCharacter(event);
+  const character = await translateKeyEvent(event);
 
   if (character) {
+    clearAutomaticExpansionTimer();
     appendToBuffer(character);
-    updateSnippetSuggestion();
+    scheduleSnippetSuggestionUpdate();
+    scheduleAutomaticExpansion(findMatchingSnippet());
   }
+}
+
+function handleKeyup(event) {
+  if (!isShiftKey(event.keycode) || !activeShiftKeys.has(event.keycode)) {
+    return;
+  }
+
+  activeShiftKeys.delete(event.keycode);
+
+  if (activeShiftKeys.size > 0) {
+    return;
+  }
+
+  const activation = resolveShiftActivation({
+    mode: settings.activationMode,
+    chordUsed: shiftChordUsed,
+    lastReleaseAt: lastCleanShiftReleaseAt,
+    now: Date.now(),
+    doubleShiftWindowMs: DOUBLE_SHIFT_WINDOW_MS,
+  });
+
+  lastCleanShiftReleaseAt = activation.nextReleaseAt;
+  shiftChordUsed = false;
+
+  if (activation.activate && !isExpandingSnippet && settings.expansionEnabled) {
+    const matchingSnippet = findMatchingSnippet();
+
+    if (matchingSnippet) {
+      runSnippetExpansion(matchingSnippet);
+    } else {
+      hideSnippetSuggestion();
+    }
+  }
+}
+
+function handleMouseClick() {
+  if (activeShiftKeys.size > 0) {
+    shiftChordUsed = true;
+  }
+
+  lastCleanShiftReleaseAt = 0;
+  resetKeyboardContext();
+}
+
+function handleMouseWheel() {
+  if (activeShiftKeys.size > 0) {
+    shiftChordUsed = true;
+  }
+
+  lastCleanShiftReleaseAt = 0;
+  resetKeyboardContext();
 }
 
 function startGlobalKeyboardListener() {
@@ -1101,11 +2029,18 @@ function startGlobalKeyboardListener() {
   }
 
   try {
-    uIOhook.on('keydown', handleKeydown);
+    uIOhook.on('keydown', (event) => enqueueInputEvent(handleKeydown, event));
+    uIOhook.on('keyup', (event) => enqueueInputEvent(handleKeyup, event));
+    uIOhook.on('click', (event) => enqueueInputEvent(handleMouseClick, event));
+    uIOhook.on('wheel', (event) => enqueueInputEvent(handleMouseWheel, event));
     uIOhook.start();
     listenerStarted = true;
+    writeDiagnostic('global-listener-started', {
+      platform: process.platform,
+    });
   } catch (error) {
     console.error('No se pudo iniciar el listener global de teclado:', error);
+    writeDiagnostic('global-listener-error', { error });
 
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send(
@@ -1236,6 +2171,34 @@ ipcMain.handle('collections:delete', (_event, payload) => {
 
 ipcMain.handle('settings:get', () => settings);
 
+ipcMain.on('snippet:rendered', (event) => {
+  if (
+    suggestionWindow
+    && !suggestionWindow.isDestroyed()
+    && event.sender === suggestionWindow.webContents
+  ) {
+    suggestionWindow.showInactive();
+  }
+});
+
+ipcMain.on('caret:update', (event, position) => {
+  if (
+    !mainWindow
+    || mainWindow.isDestroyed()
+    || event.sender !== mainWindow.webContents
+    || !Number.isFinite(position?.x)
+    || !Number.isFinite(position?.y)
+  ) {
+    return;
+  }
+
+  rendererCaretPosition = {
+    x: position.x,
+    y: position.y,
+    updatedAt: Date.now(),
+  };
+});
+
 ipcMain.handle('settings:update', (_event, payload) => {
   settings = normalizeStoredSettings({
     ...settings,
@@ -1246,9 +2209,48 @@ ipcMain.handle('settings:update', (_event, payload) => {
     hideSnippetSuggestion();
   }
 
+  clearAutomaticExpansionTimer();
+  keyboardBuffer = '';
+  activeShiftKeys.clear();
+  shiftChordUsed = false;
+  lastCleanShiftReleaseAt = 0;
+
   saveSettingsToDisk();
-  updateTabShortcutRegistration();
+  writeDiagnostic('settings-updated', {
+    activationMode: settings.activationMode,
+    expansionEnabled: settings.expansionEnabled,
+    showSuggestion: settings.showSuggestion,
+    theme: settings.theme,
+  });
   return settings;
+});
+
+ipcMain.handle('diagnostics:export', async () => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Exportar diagnostico',
+    defaultPath: 'VetSnippets-diagnostico.log',
+    filters: [
+      { name: 'Registro', extensions: ['log', 'txt'] },
+    ],
+  });
+
+  if (result.canceled || !result.filePath) {
+    return { canceled: true };
+  }
+
+  const filePath = getDiagnosticsPath();
+  const backupPath = `${filePath}.1`;
+  const parts = [backupPath, filePath]
+    .filter((candidate) => fs.existsSync(candidate))
+    .map((candidate) => fs.readFileSync(candidate, 'utf8'));
+
+  fs.writeFileSync(result.filePath, parts.join(''), 'utf8');
+  writeDiagnostic('diagnostics-exported');
+
+  return {
+    canceled: false,
+    filePath: result.filePath,
+  };
 });
 
 ipcMain.handle('snippets:export-csv', async () => {
@@ -1418,36 +2420,71 @@ ipcMain.handle('snippets:delete-all', (_event, confirmationText) => {
   };
 });
 
+const hasSingleInstanceLock = (
+  process.env.VETSNIPPETS_ALLOW_MULTIPLE === '1'
+  || app.requestSingleInstanceLock()
+);
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+}
+
+app.on('second-instance', (_event, commandLine) => {
+  if (!commandLine.includes('--background')) {
+    showMainWindow();
+  }
+});
+
 app.whenReady().then(() => {
+  if (!hasSingleInstanceLock) {
+    return;
+  }
+
+  const startInBackground = process.argv.includes('--background');
+
+  writeDiagnostic('app-ready', {
+    appVersion: app.getVersion(),
+    electronVersion: process.versions.electron,
+    nodeVersion: process.versions.node,
+    platform: process.platform,
+    arch: process.arch,
+    packaged: app.isPackaged,
+    background: startInBackground,
+  });
   enableOpenAtLogin();
   loadSettingsFromDisk();
   loadCollectionsFromDisk();
   loadSnippetsFromDisk();
-  createWindow();
+  if (!startInBackground) {
+    createWindow();
+  }
   createSuggestionWindow();
+  createTray();
+  startKeyboardTranslator();
+  startCaretTracker();
   startGlobalKeyboardListener();
-  updateTabShortcutRegistration();
   startDevelopmentReload();
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
+    showMainWindow();
   });
 });
 
 app.on('before-quit', () => {
+  isQuitting = true;
   [
     'index.html',
     'renderer.js',
     'preload.js',
     'snippet-tooltip.html',
+    'snippet-tooltip.js',
     'tooltip-preload.js',
   ].forEach((fileName) => {
     fs.unwatchFile(path.join(__dirname, fileName));
   });
   clearTimeout(devReloadTimer);
-  globalShortcut.unregisterAll();
+  stopKeyboardTranslator();
+  stopCaretTracker();
 
   if (listenerStarted) {
     uIOhook.stop();
@@ -1455,7 +2492,5 @@ app.on('before-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  // VetSnippets permanece activo en la bandeja hasta elegir "Salir".
 });

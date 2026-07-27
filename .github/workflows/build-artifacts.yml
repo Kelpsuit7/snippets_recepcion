@@ -83,8 +83,11 @@ jobs:
             throw "Expected ${{ matrix.platform }} icon '$iconPath', but package.json uses '$configuredIcon'"
           }
 
-      - name: Check main process syntax
-        run: node --check main.js
+      - name: Check JavaScript syntax
+        run: npm run check
+
+      - name: Run unit tests
+        run: npm test
 
       - name: Build ${{ matrix.name }}
         run: ${{ matrix.build-command }}

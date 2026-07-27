@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'">
   <title>VetSnippets</title>
   <style>
     :root {
@@ -460,7 +461,8 @@
       justify-content: flex-end;
     }
 
-    .theme-select {
+    .theme-select,
+    .activation-mode-select {
       min-width: 220px;
     }
 
@@ -1208,8 +1210,20 @@
 
           <div class="setting-row">
             <div>
+              <p class="setting-title">Activación del snippet</p>
+              <p class="setting-copy">Elige entre Shift simple, doble Shift o expansión automática.</p>
+            </div>
+            <select class="field activation-mode-select" data-activation-mode aria-label="Modo de activación del snippet">
+              <option value="shift">Al presionar Shift</option>
+              <option value="double-shift">Al presionar Shift dos veces</option>
+              <option value="automatic">Automático</option>
+            </select>
+          </div>
+
+          <div class="setting-row">
+            <div>
               <p class="setting-title">Aviso flotante</p>
-              <p class="setting-copy">Muestra un aviso cuando una abreviatura coincide.</p>
+              <p class="setting-copy">Muestra un aviso al coincidir una abreviatura en el modo con Shift.</p>
             </div>
             <label class="toggle" aria-label="Mostrar aviso flotante">
               <input type="checkbox" data-setting="showSuggestion">
@@ -1226,6 +1240,14 @@
               <button class="secondary-button" type="button" data-import-csv>Importar CSV</button>
               <button class="secondary-button" type="button" data-export-csv>Exportar CSV</button>
             </div>
+          </div>
+
+          <div class="setting-row">
+            <div>
+              <p class="setting-title">Diagnóstico</p>
+              <p class="setting-copy">Exporta eventos técnicos recientes sin incluir el texto de tus snippets.</p>
+            </div>
+            <button class="secondary-button" type="button" data-export-diagnostics>Exportar diagnóstico</button>
           </div>
 
           <div class="setting-row danger-zone">

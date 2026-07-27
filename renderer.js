@@ -13,8 +13,10 @@ const viewTitle = document.querySelector('[data-view-title]');
 const viewSubtitle = document.querySelector('[data-view-subtitle]');
 const importCsvButton = document.querySelector('[data-import-csv]');
 const exportCsvButton = document.querySelector('[data-export-csv]');
+const exportDiagnosticsButton = document.querySelector('[data-export-diagnostics]');
 const deleteAllSnippetsButton = document.querySelector('[data-delete-all-snippets]');
 const themeSelect = document.querySelector('[data-theme-select]');
+const activationModeSelect = document.querySelector('[data-activation-mode]');
 const navButtons = document.querySelectorAll('[data-nav-target]');
 const views = document.querySelectorAll('[data-view]');
 const settingInputs = document.querySelectorAll('[data-setting]');
@@ -62,6 +64,84 @@ const VIEW_METADATA = {
     subtitle: 'Personaliza el funcionamiento, los respaldos y la apariencia.',
   },
 };
+
+const CARET_STYLE_PROPERTIES = [
+  'boxSizing',
+  'width',
+  'height',
+  'paddingTop',
+  'paddingRight',
+  'paddingBottom',
+  'paddingLeft',
+  'borderTopWidth',
+  'borderRightWidth',
+  'borderBottomWidth',
+  'borderLeftWidth',
+  'fontFamily',
+  'fontSize',
+  'fontStyle',
+  'fontWeight',
+  'letterSpacing',
+  'lineHeight',
+  'textTransform',
+  'textIndent',
+  'wordSpacing',
+];
+
+function reportTextCaretPosition(target) {
+  if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
+    return;
+  }
+
+  const selectionEnd = target.selectionEnd;
+
+  if (!Number.isInteger(selectionEnd)) {
+    return;
+  }
+
+  const computedStyle = window.getComputedStyle(target);
+  const mirror = document.createElement('div');
+  const marker = document.createElement('span');
+
+  CARET_STYLE_PROPERTIES.forEach((property) => {
+    mirror.style[property] = computedStyle[property];
+  });
+  mirror.style.position = 'fixed';
+  mirror.style.left = '-10000px';
+  mirror.style.top = '0';
+  mirror.style.visibility = 'hidden';
+  mirror.style.pointerEvents = 'none';
+  mirror.style.overflow = 'hidden';
+  mirror.style.whiteSpace = target instanceof HTMLTextAreaElement ? 'pre-wrap' : 'pre';
+  mirror.style.overflowWrap = 'break-word';
+  mirror.textContent = target.value.slice(0, selectionEnd);
+  marker.textContent = '\u200b';
+  mirror.append(marker);
+  document.body.append(mirror);
+
+  const targetBounds = target.getBoundingClientRect();
+  const mirrorBounds = mirror.getBoundingClientRect();
+  const markerBounds = marker.getBoundingClientRect();
+
+  window.snippetsApi.updateCaretPosition({
+    x: targetBounds.left + markerBounds.left - mirrorBounds.left - target.scrollLeft,
+    y: targetBounds.top + markerBounds.top - mirrorBounds.top - target.scrollTop,
+  });
+
+  mirror.remove();
+}
+
+document.addEventListener('input', (event) => {
+  reportTextCaretPosition(event.target);
+});
+
+document.addEventListener('click', (event) => {
+  reportTextCaretPosition(event.target);
+});
+
+document.addEventListener('keyup', (event) => {
+  reportTextCaretPosition(event.target);
+});
 
 function setStatus(message, options = {}) {
   const { temporary = true, tone = 'info' } = options;
@@ -632,6 +712,7 @@ function renderSettings() {
   settingInputs.forEach((input) => {
     input.checked = Boolean(settings[input.dataset.setting]);
   });
+  activationModeSelect.value = settings.activationMode || 'shift';
   applyAppearance();
 }
 
@@ -791,6 +872,25 @@ exportCsvButton.addEventListener('click', async () => {
   }
 });
 
+exportDiagnosticsButton.addEventListener('click', async () => {
+  exportDiagnosticsButton.disabled = true;
+
+  try {
+    const result = await window.snippetsApi.exportDiagnostics();
+
+    if (result.canceled) {
+      setStatus('Exportación de diagnóstico cancelada.');
+      return;
+    }
+
+    setStatus('Diagnóstico exportado.');
+  } catch (error) {
+    setStatus(error.message, { tone: 'error' });
+  } finally {
+    exportDiagnosticsButton.disabled = false;
+  }
+});
+
 deleteAllSnippetsButton.addEventListener('click', async () => {
   if (snippets.length === 0 && collections.length === 0) {
     setStatus('No hay snippets ni colecciones para eliminar.');
@@ -840,6 +940,31 @@ themeSelect.addEventListener('change', async () => {
   } catch (error) {
     themeSelect.value = previousTheme;
     setStatus(error.message, { tone: 'error' });
+  }
+});
+
+activationModeSelect.addEventListener('input', async () => {
+  const previousMode = settings.activationMode || 'shift';
+  const selectedMode = activationModeSelect.value;
+
+  activationModeSelect.disabled = true;
+
+  try {
+    settings = await window.snippetsApi.updateSettings({
+      activationMode: selectedMode,
+    });
+
+    if (settings.activationMode !== selectedMode) {
+      throw new Error('No se pudo guardar el modo de activación.');
+    }
+
+    renderSettings();
+    setStatus('Modo de activación guardado.');
+  } catch (error) {
+    activationModeSelect.value = previousMode;
+    setStatus(error.message, { tone: 'error' });
+  } finally {
+    activationModeSelect.disabled = false;
   }
 });
 
@@ -899,24 +1024,6 @@ confirmDialog.addEventListener('click', (event) => {
 
 document.addEventListener('keydown', (event) => {
   if (!pendingConfirm) {
-    return;
-  }
-
-  if (event.key === 'Tab') {
-    const focusableElements = [...confirmDialog.querySelectorAll('button, input')]
-      .filter((element) => !element.hidden && !element.disabled && element.offsetParent !== null);
-    const firstElement = focusableElements[0];
-    const lastElement = focusableElements[focusableElements.length - 1];
-
-    if (focusableElements.length > 0) {
-      if (event.shiftKey && document.activeElement === firstElement) {
-        event.preventDefault();
-        lastElement.focus();
-      } else if (!event.shiftKey && document.activeElement === lastElement) {
-        event.preventDefault();
-        firstElement.focus();
-      }
-    }
     return;
   }
 
