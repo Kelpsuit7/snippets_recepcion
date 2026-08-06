@@ -7,7 +7,7 @@
   "scripts": {
     "start": "electron .",
     "check": "node --check main.js && node --check renderer.js && node --check preload.js && node --check tooltip-preload.js && node --check snippet-tooltip.js && node --check lib/snippet-core.js && node --check scripts/windows-expansion-smoke.js && node --check scripts/windows-edge-expansion-smoke.js",
-    "test": "node --test test/*.test.js",
+    "test": "node --test",
     "test:integration:win": "node scripts/windows-expansion-smoke.js",
     "test:integration:win:double": "node scripts/windows-expansion-smoke.js --double",
     "test:integration:win:edge": "node scripts/windows-edge-expansion-smoke.js",
